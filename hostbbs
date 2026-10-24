@@ -34,6 +34,8 @@ import copy
 import datetime
 import hashlib
 import hmac
+import html
+import ipaddress
 import json
 import math
 import operator
@@ -51,6 +53,7 @@ import sys
 import textwrap
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -96,6 +99,8 @@ DEFAULTS = {
         "oneliners": True,     # the wall of short messages
         "profiles": True,      # calling cards: computer, location, bio
         "page": True,          # page the sysop into a private chat room
+        "pastebin": True,      # share text by a short code
+        "news": True,          # RSS/Atom news channels
     },
     "art": {
         "enabled": True,
@@ -121,6 +126,18 @@ DEFAULTS = {
     "phone": "555-0199",  # shown in the modem handshake
     "sysop_hours": "",  # e.g. "18:00-23:00": when the sysop answers pages (empty: always)
     "birthday": "",  # "MM-DD": shows events/birthday*.ans on that day
+    "news_channels": [  # the news reader's channels for everyone (any RSS or Atom feed)
+        {"name": "Hacker News", "url": "https://hnrss.org/frontpage"},
+        {"name": "BBC News", "url": "https://feeds.bbci.co.uk/news/rss.xml"},
+        {"name": "Ars Technica", "url": "https://feeds.arstechnica.com/arstechnica/index"},
+        {"name": "Slashdot", "url": "http://rss.slashdot.org/Slashdot/slashdotMain"},
+        {"name": "LWN.net", "url": "https://lwn.net/headlines/rss"},
+        {"name": "The Register", "url": "https://www.theregister.com/headlines.atom"},
+        {"name": "NASA", "url": "https://www.nasa.gov/rss/dyn/breaking_news.rss"},
+        {"name": "xkcd", "url": "https://xkcd.com/atom.xml"},
+    ],
+    "news": {"custom": True, "per_user": 8, "cache_minutes": 15, "allow_private": False},  # callers may add own feeds
+    "paste": {"per_user": 50, "max_lines": 300},
     "trivia_file": "",  # your own questions: [{"q": "...", "a": ["right", "wrong", "wrong", "wrong"]}]
     "log": True,  # data/hostbbs.log: logins, bans, operator commands (rotated)
     "force": {  # how `hostbbs op force` messages look on the caller's screen
@@ -1370,6 +1387,8 @@ def week_key(offset=0):
 
 class BBSMore:
     def init_more(self):
+        self.pastes = self.load("pastes")
+        self.pastes.setdefault("items", [])
         self.meta.setdefault("daily", {})
         self.meta.setdefault("hours", [0] * 24)
         self.meta.setdefault("trivia", {"weeks": {}, "scores": {}})
@@ -3407,6 +3426,8 @@ ACHIEVEMENTS = {  # key: (title, how)
     "mphang": ("Gallows humour", "Win a multiplayer Hangman game"),
     "mpwin": ("Table talk", "Win Connect Four, Battleship, Reversi or Word Race"),
     "mines": ("Sweeper", "Clear a Minesweeper field"),
+    "paste": ("Paste it", "Share something on the pastebin"),
+    "newsy": ("Well informed", "Read a news channel"),
     "scholar": ("Scholar", "Answer the weekly trivia question correctly"),
     "quiz": ("Quiz whiz", "Get 8 of 10 right in the quiz"),
     "cotm": ("Caller of the month", "Be the top caller of a month"),
@@ -4747,6 +4768,11 @@ class ConfigMixin:
                                                           lambda i: "%s %-9s %-9s %s" % (i.get("at", ""), i.get("days", "daily"), i.get("mode", ""), str(i.get("message", ""))[:36]),
                                                           {"at": "22:00", "days": "daily", "mode": "broadcast", "message": ""})),
             ("D", "Limits", lambda: self.cfg_form("Limits", raw, limits)),
+            ("F", "News channels", lambda: self.cfg_list("News channels", raw["news_channels"], SPEC_FEED,
+                                                         lambda i: "%-16s %s" % (i.get("name", ""), i.get("url", "")[:46]),
+                                                         {"name": "New channel", "url": "https://"})),
+            ("G", "News settings", lambda: self.cfg_form("News settings", raw["news"], SPEC_NEWS)),
+            ("H", "Pastebin settings", lambda: self.cfg_form("Pastebin settings", raw["paste"], SPEC_PASTE)),
             ("E", "Art rotation", lambda: self.cfg_form("Art rotation", raw, [("art_dir", "Art folder", "str", None), ("art_rotation", "Rotation", "pick", PICK_ROT)])),
         ]
         while True:
@@ -4772,7 +4798,356 @@ class ConfigMixin:
                 return
 
 
-class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, MoreGamesMixin, GamesMixin):
+# --------------------------------------------------------------------------
+# News reader (RSS and Atom) and pastebin
+# --------------------------------------------------------------------------
+
+class NewsError(Exception):
+    pass
+
+
+def feed_url_ok(url, allow_private=False):
+    """Only http(s) addresses of hosts on the public internet (callers may add their own feeds)."""
+    u = urllib.parse.urlsplit(url.strip())
+    if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password:
+        raise NewsError("only plain http:// or https:// addresses")
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        raise NewsError("cannot find that host")
+    for info in infos:
+        if not allow_private and not ipaddress.ip_address(info[4][0].split("%")[0]).is_global:
+            raise NewsError("that address is not on the public internet")
+    return u.geturl()
+
+
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allow_private):
+        self.allow_private = allow_private
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        feed_url_ok(newurl, self.allow_private)      # every hop is checked, not just the first
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _local(tag):
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _plain(html_text, width=76):
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html_text or "", flags=re.S | re.I)
+    text = re.sub(r"<br\s*/?>|</p>|</li>|</div>", "\n", text, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    text = "".join(ch for ch in text if printable(ch) or ch == "\n")
+    return [ln for para in re.split(r"\n\s*\n|\n", text.strip()) if para.strip() for ln in textwrap.wrap(para.strip(), width)][:40]
+
+
+def _when(text):
+    if not text:
+        return 0
+    text = text.strip()
+    try:
+        import email.utils
+        return email.utils.parsedate_to_datetime(text).timestamp()
+    except (TypeError, ValueError, IndexError):
+        pass
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0
+
+
+def parse_feed(data):
+    """(feed title, [ {title, link, ts, text} ]) from RSS 2.0, RSS 1.0 (RDF) or Atom."""
+    if b"<!ENTITY" in data:
+        raise NewsError("that feed uses features I will not parse")
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        raise NewsError("that does not look like an RSS or Atom feed")
+    kind = _local(root.tag)
+    if kind == "rss":
+        chan = next((c for c in root if _local(c.tag) == "channel"), root)
+        nodes = [i for i in chan if _local(i.tag) == "item"]
+    elif kind == "RDF":
+        chan = next((c for c in root if _local(c.tag) == "channel"), root)
+        nodes = [i for i in root if _local(i.tag) == "item"]
+    elif kind == "feed":
+        chan, nodes = root, [e for e in root if _local(e.tag) == "entry"]
+    else:
+        raise NewsError("that does not look like an RSS or Atom feed")
+    def child(node, *names):
+        for c in node:
+            if _local(c.tag) in names:
+                return c
+    title_el = child(chan, "title")
+    items = []
+    for n in nodes[:60]:
+        link = ""
+        for c in n:
+            if _local(c.tag) == "link":
+                link = c.get("href") or (c.text or "").strip()
+                if link and c.get("rel", "alternate") == "alternate":
+                    break
+        body = child(n, "encoded", "content", "description", "summary")
+        items.append({"title": " ".join(((child(n, "title").text if child(n, "title") is not None else "") or "(no title)").split())[:200],
+                      "link": link[:500],
+                      "ts": _when((child(n, "pubDate", "date", "updated", "published").text) if child(n, "pubDate", "date", "updated", "published") is not None else ""),
+                      "text": _plain(body.text if body is not None else "")})
+    return " ".join((title_el.text or "").split())[:80] if title_el is not None else "", items
+
+
+def fetch_feed(url, allow_private=False, limit=1_000_000):
+    """Download and parse a feed. Blocking: run it with offload()."""
+    feed_url_ok(url, allow_private)
+    opener = urllib.request.build_opener(_CheckedRedirect(allow_private))
+    req = urllib.request.Request(url, headers={"User-Agent": "rBBS-news/1.0 (+https://github.com/jgm240/rbbs)",
+                                               "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"})
+    try:
+        with opener.open(req, timeout=8) as r:
+            data = r.read(limit + 1)
+    except NewsError:
+        raise
+    except (OSError, ValueError) as e:
+        raise NewsError("could not download it (%s)" % (getattr(e, "reason", None) or e))
+    if len(data) > limit:
+        raise NewsError("that feed is too big")
+    return parse_feed(data)
+
+
+class PasteMixin:
+    """The pastebin: share text by a short code; listed for everyone, or unlisted."""
+    ALPHA = "abcdefghjkmnpqrstuvwxyz23456789"
+    EXPIRY = [("never", None), ("1 hour", 3600), ("1 day", 86400), ("1 week", 7 * 86400)]
+
+    def paste_items(self):
+        items = self.bbs.pastes["items"]
+        now = time.time()
+        items[:] = [p for p in items if not p.get("expires") or p["expires"] > now]
+        del items[:-500]
+        return items
+
+    async def pastebin(self):
+        self.where = "Pastebin"
+        bbs = self.bbs
+        while True:
+            await self.header("Pastebin")
+            shown = [p for p in reversed(self.paste_items()) if p["listed"]][:10]
+            for i, p in enumerate(shown, 1):
+                await self.send(" %s %s  %-14s %s\n" % (self.c("byellow", "%2d" % i), self.c("bcyan", p["id"]), p["author"][:14], p["title"][:44]))
+            if not shown:
+                await self.send("  (nothing listed yet)\n")
+            cmds = "[N]ew paste  [V]iew by code  [M]y pastes  [Q]uit   or a number to open"
+            a = (await self.readline("\n%s\n> " % cmds)).strip()
+            low = a.lower()
+            if not a or low == "q":
+                return
+            if a.isdigit() and 1 <= int(a) <= len(shown):
+                await self.paste_view(shown[int(a) - 1])
+            elif low == "n":
+                await self.paste_new()
+            elif low == "v":
+                code = (await self.readline("Code: ")).strip().lower()
+                p = next((p for p in self.paste_items() if p["id"] == code), None)
+                await (self.paste_view(p) if p else self.send(self.c("red", "No paste with that code (it may have expired).\n")))
+            elif low == "m":
+                await self.paste_mine()
+
+    async def paste_new(self):
+        bbs, lim = self.bbs, self.cfg.get("paste") or {}
+        if self.guest:
+            await self.send(self.c("red", "Guests can read pastes but not write them. Register an account!\n"))
+            return
+        if bbs.is_muted(self.name):
+            await self.send(self.c("red", "You are muted.\n"))
+            return
+        mine = [p for p in self.paste_items() if p["author"].lower() == self.name.lower()]
+        if len(mine) >= int(lim.get("per_user", 50)):
+            await self.send(self.c("red", "You have %d pastes already; delete some first.\n" % len(mine)))
+            return
+        title = (await self.readline("Title: ", maxlen=60)).strip()
+        if not title:
+            return
+        await self.send(self.c("gray", "Paste the text now.\n"))
+        body = await self.read_body(int(lim.get("max_lines", 300)))
+        if not body:
+            return
+        await self.send("Expires: " + "  ".join("%d=%s" % (i + 1, n) for i, (n, _) in enumerate(self.EXPIRY)) + "\n")
+        ex = (await self.readline("Choice [1]: ")).strip()
+        secs = self.EXPIRY[int(ex) - 1][1] if ex.isdigit() and 1 <= int(ex) <= len(self.EXPIRY) else None
+        listed = await self.ask_yn("List it on the pastebin? (No = only people with the code can open it)", True)
+        used = {p["id"] for p in bbs.pastes["items"]}
+        code = "".join(secrets.choice(self.ALPHA) for _ in range(6))
+        while code in used:
+            code = "".join(secrets.choice(self.ALPHA) for _ in range(6))
+        bbs.pastes["items"].append({"id": code, "author": self.name, "ts": time.time(), "title": title, "body": body,
+                                    "listed": listed, "expires": time.time() + secs if secs else None, "views": 0})
+        bbs.save("pastes", bbs.pastes)
+        self.award("paste")
+        await self.send(self.c("bgreen", "Saved. Its code is: ") + self.c("bwhite", code) + "\n")
+
+    async def paste_view(self, p):
+        p["views"] = p.get("views", 0) + 1
+        await self.header(p["title"])
+        await self.send(self.c("gray", " %s by %s, %s%s, %d view%s   code %s\n\n" % (
+            "listed" if p["listed"] else "unlisted", p["author"], fdate(p["ts"]),
+            ", expires " + fdate(p["expires"]) if p.get("expires") else "", p["views"], "" if p["views"] == 1 else "s", p["id"])))
+        page = max(8, self.rows - 6)
+        w = max(30, self.cols - 8)
+        n = 0
+        for i, ln in enumerate(p["body"], 1):
+            for part in (textwrap.wrap(ln, w) or [""]):
+                await self.send(" %s %s\n" % (self.c("gray", "%3d" % i), part))
+                n += 1
+                if n % page == 0 and (await self.readline(self.c("gray", "-- more (Enter, Q stops) --"))).strip().lower().startswith("q"):
+                    self.bbs.save("pastes", self.bbs.pastes)
+                    return
+        self.bbs.save("pastes", self.bbs.pastes)
+        if p["author"].lower() == self.name.lower() or self.mod:
+            if (await self.readline(self.c("gray", "\n[D]elete this paste, or Enter: "))).strip().lower() == "d" and await self.ask_yn("Really delete?", False):
+                self.bbs.pastes["items"].remove(p)
+                self.bbs.save("pastes", self.bbs.pastes)
+                await self.send("Deleted.\n")
+        else:
+            await self.readline(self.c("gray", "\n[Enter to continue]"))
+
+    async def paste_mine(self):
+        mine = [p for p in self.paste_items() if p["author"].lower() == self.name.lower()]
+        if not mine:
+            await self.send("  You have no pastes.\n")
+            return
+        for i, p in enumerate(mine, 1):
+            await self.send(" %s %s %-8s %s\n" % (self.c("byellow", "%2d" % i), self.c("bcyan", p["id"]), "listed" if p["listed"] else "unlisted", p["title"][:44]))
+        a = (await self.readline("Number to open (Enter = back): ")).strip()
+        if a.isdigit() and 1 <= int(a) <= len(mine):
+            await self.paste_view(mine[int(a) - 1])
+
+
+class NewsMixin:
+    """RSS/Atom channels: the sysop's, and each caller's own."""
+
+    def news_channels(self):
+        out = [dict(c, mine=False) for c in self.cfg.get("news_channels") or []]
+        u = self.user_rec()
+        if u:
+            out += [dict(c, mine=True) for c in u.get("feeds", [])]
+        return out
+
+    async def news_load(self, ch):
+        news = self.cfg.get("news") or {}
+        cache = self.bbs.__dict__.setdefault("news_cache", {})
+        hit = cache.get(ch["url"])
+        if hit and time.time() - hit[0] < 60 * int(news.get("cache_minutes", 15)):
+            return hit[1], hit[2]
+        title, items = await offload(fetch_feed, ch["url"], bool(news.get("allow_private")) and not ch["mine"])
+        cache[ch["url"]] = (time.time(), title, items)
+        return title, items
+
+    async def news_menu(self):
+        self.where = "News"
+        news = self.cfg.get("news") or {}
+        while True:
+            chans = self.news_channels()
+            await self.header("News")
+            for i, c in enumerate(chans, 1):
+                await self.send(" %s %-22s %s\n" % (self.c("byellow", "%2d" % i), c["name"][:22], self.c("gray", "(yours)" if c["mine"] else "")))
+            if not chans:
+                await self.send("  (no channels yet)\n")
+            can = news.get("custom", True) and not self.guest
+            a = (await self.readline("\nChannel # to read%s (Enter = back): " % ("   [A]dd your own  [D]elete one" if can else ""))).strip()
+            low = a.lower()
+            if not a or low == "q":
+                return
+            if a.isdigit() and 1 <= int(a) <= len(chans):
+                await self.news_channel(chans[int(a) - 1])
+            elif low == "a" and can:
+                await self.news_add()
+            elif low == "d" and can:
+                await self.news_delete()
+
+    async def news_add(self):
+        u = self.user_rec()
+        feeds = u.setdefault("feeds", [])
+        news = self.cfg.get("news") or {}
+        if len(feeds) >= int(news.get("per_user", 8)):
+            await self.send(self.c("red", "You have %d feeds already; delete one first.\n" % len(feeds)))
+            return
+        url = (await self.readline("Feed address (RSS or Atom, https://...): ", maxlen=300)).strip()
+        if not url:
+            return
+        if "://" not in url:
+            url = "https://" + url
+        await self.send(self.c("gray", "Checking it...\n"))
+        try:
+            title, items = await offload(fetch_feed, url, False)
+        except NewsError as e:
+            await self.send(self.c("red", "Not added: %s.\n" % e))
+            return
+        name = (await self.readline("Name for it [%s]: " % (title or "my feed"), maxlen=22)).strip() or title or "my feed"
+        feeds.append({"name": name[:22], "url": url})
+        self.bbs.save("users", self.bbs.users)
+        await self.send(self.c("bgreen", "Added %s (%d items).\n" % (name, len(items))))
+
+    async def news_delete(self):
+        feeds = (self.user_rec() or {}).get("feeds", [])
+        if not feeds:
+            await self.send("  You have no feeds of your own.\n")
+            return
+        for i, c in enumerate(feeds, 1):
+            await self.send(" %s %s\n" % (self.c("byellow", "%2d" % i), c["name"]))
+        a = (await self.readline("Delete which? (Enter = none): ")).strip()
+        if a.isdigit() and 1 <= int(a) <= len(feeds):
+            gone = feeds.pop(int(a) - 1)
+            self.bbs.save("users", self.bbs.users)
+            await self.send("Deleted %s.\n" % gone["name"])
+
+    async def news_channel(self, ch):
+        await self.send(self.c("gray", "\nFetching %s...\n" % ch["name"]))
+        try:
+            title, items = await self.news_load(ch)
+        except NewsError as e:
+            await self.send(self.c("red", "Could not read it: %s.\n" % e))
+            return
+        self.award("newsy")
+        per = max(5, self.rows - 9)
+        page, u = 0, self.user_rec()
+        seen_key = ch["url"]
+        last_seen = (u or {}).get("news_seen", {}).get(seen_key, 0)
+        newest = max([i["ts"] for i in items] + [0])
+        while True:
+            await self.header("%s%s" % (ch["name"], (" - " + title) if title and title != ch["name"] else ""))
+            chunk = items[page * per:(page + 1) * per]
+            for i, it in enumerate(chunk, page * per + 1):
+                fresh = self.c("bgreen", "*") if it["ts"] > last_seen else " "
+                when = time.strftime("%m-%d %H:%M", time.localtime(it["ts"])) if it["ts"] else "     ?    "
+                await self.send(" %s%s %s  %s\n" % (fresh, self.c("byellow", "%2d" % i), self.c("gray", when), it["title"][:max(20, self.cols - 24)]))
+            if not items:
+                await self.send("  (the feed is empty)\n")
+            more = len(items) > (page + 1) * per
+            a = (await self.readline("\n# to read%s%s  [Q]uit\n> " % ("  [N]ext page" if more else "", "  [P]revious" if page else ""))).strip().lower()
+            if not a or a == "q":
+                break
+            if a == "n" and more:
+                page += 1
+            elif a == "p" and page:
+                page -= 1
+            elif a.isdigit() and 1 <= int(a) <= len(items):
+                await self.news_read(items[int(a) - 1])
+        if u is not None and newest:
+            u.setdefault("news_seen", {})[seen_key] = newest
+            self.bbs.save("users", self.bbs.users)
+
+    async def news_read(self, it):
+        await self.header(it["title"][:70])
+        if it["ts"]:
+            await self.send(self.c("gray", " %s\n" % fdate(it["ts"])))
+        await self.send("\n" + "\n".join(" " + ln for ln in it["text"]) + ("\n" if it["text"] else self.c("gray", " (no summary in the feed)\n")))
+        if it["link"]:
+            await self.send("\n " + self.c("cyan", it["link"]) + "\n")
+        await self.readline(self.c("gray", "\n[Enter to continue]"))
+
+
+class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, PasteMixin, NewsMixin, MoreGamesMixin, GamesMixin):
     def __init__(self, bbs, reader, writer):
         self.bbs, self.r, self.w = bbs, reader, writer
         self.cfg = bbs.cfg
@@ -5145,6 +5520,8 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, More
                   self.voting_booth),
             "Y": ("Today", f.get("daily", True), self.today),
             "X": ("Page the sysop", f.get("page", True) and f.get("chat") and bool(bbs.rooms), self.page_sysop),
+            "K": ("Pastebin", f.get("pastebin", True), self.pastebin),
+            "N": ("News", f.get("news", True), self.news_menu),
             "O": ("Oneliner wall", f.get("oneliners", True), self.oneliner_wall),
             "R": ("Profiles", f.get("profiles", True), self.profiles),
             "Q": ("Trivia & quiz", f.get("trivia", True), self.trivia_menu),
@@ -6166,6 +6543,7 @@ FEATURES = [("chat", "Chat rooms"), ("boards", "Message boards"), ("mail", "Priv
             ("daily", "Today screen (fortune, tip, history)"), ("lastcallers", "Last callers"),
             ("oneliners", "Oneliner wall"), ("profiles", "Profiles (calling cards)"), ("trivia", "Trivia & quiz"),
             ("stats", "Statistics & caller of the month"), ("page", "Page the sysop"),
+            ("pastebin", "Pastebin"), ("news", "News reader (RSS/Atom)"),
             ("guests", "Guest logins"), ("register", "New user registration")]
 PICK_BAUD = [(0, "Full speed"), (300, "300 baud"), (1200, "1200 baud"), (2400, "2400 baud"), (9600, "9600 baud"),
              (14400, "14400 baud"), (28800, "28800 baud")]
@@ -6177,6 +6555,11 @@ SPEC_MUSIC = [("enabled", "ANSI music", "bool", None), ("ask", "Ask each caller 
 SPEC_WEB = [("enabled", "Web terminal port (WebSocket)", "bool", None), ("host", "Listen address", "str", None),
             ("port", "Port", "int", None), ("origins", "Allowed pages (separate with |; blank = any)", "motd", None),
             ("cert", "TLS certificate file (for wss://)", "str", None), ("key", "TLS key file", "str", None)]
+SPEC_FEED = [("name", "Channel name", "str", None), ("url", "Feed address (RSS or Atom)", "str", None)]
+SPEC_NEWS = [("custom", "Callers may add their own feeds", "bool", None), ("per_user", "Feeds per caller", "int", None),
+             ("cache_minutes", "Keep a feed for (minutes)", "int", None),
+             ("allow_private", "Allow private-network feeds (sysop channels only)", "bool", None)]
+SPEC_PASTE = [("per_user", "Pastes per caller", "int", None), ("max_lines", "Longest paste (lines)", "int", None)]
 PICK_SCHEDMODE = [("broadcast", "A line at each caller's prompt"), ("force", "A forced message on every screen")]
 SPEC_SCHED = [("at", "Time (HH:MM)", "str", None),
               ("days", "Days: daily weekdays weekends mon,fri MM-DD", "str", None),
@@ -6379,6 +6762,7 @@ class Setup:
                                                       "on" if c["music"]["enabled"] else "off")),
             ("R", "Web & reload", "web %s, autoreload %s" % ("on" if c["websocket"]["enabled"] else "off", "on" if c.get("autoreload", True) else "off")),
             ("T", "Timed messages", "%d scheduled" % len(c.get("schedule") or [])),
+            ("N", "News channels", "%d channels" % len(c.get("news_channels") or [])),
             ("E", "Events & hours", "sysop hours %s" % (c.get("sysop_hours") or "any time")),
             ("V", "Voting & daily", "elections %s, %d seat%s" % ("on" if c["features"].get("elections") else "off",
                                                               c["election"]["seats"], "" if c["election"]["seats"] == 1 else "s")),
@@ -6435,6 +6819,10 @@ class Setup:
                                  {"at": "22:00", "days": "daily", "mode": "broadcast", "message": ""})   # (no message: it never fires)
             elif sel == "E":
                 self.events_hours()
+            elif sel == "N":
+                self.list_editor("News channels", "news_channels", SPEC_FEED,
+                                 lambda i: "%-16s %s" % (i.get("name", ""), i.get("url", "")[:50]),
+                                 {"name": "New channel", "url": "https://"})
             elif sel == "V":
                 self.voting_extras()
             elif sel == "P":

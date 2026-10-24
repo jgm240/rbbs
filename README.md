@@ -21,6 +21,7 @@ Settings live in `~/hostbbs/hostbbs.json` (or `-c FILE`), data in `data/` next t
 
 ## What is in it
 - **Boards and people:** threaded boards with a new-since-last-call scan, private mail, oneliner wall, profiles, last callers.
+- **Pastebin and news:** share text by a short code (listed or unlisted, with expiry); read RSS/Atom channels (Hacker News, BBC, Ars Technica, Slashdot, LWN, The Register, NASA, xkcd by default; the sysop edits the list) and add your own feeds. Callers' feeds can only point at public addresses.
 - **Chat:** rooms with topics/passwords, `/roll /8ball /ignore /afk /color /challenge`, paging the sysop into a private room.
 - **Games, built in:** Chess (own engine), cave Adventure, Hangman, Robots, Snake, Sudoku, Minesweeper, Solitaire.
 - **Multiplayer tables:** Tic-Tac-Toe, Connect Four, Battleship, Reversi, Hangman, Word Race.

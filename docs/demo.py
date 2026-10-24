@@ -89,7 +89,7 @@ def demo_config(opts):
         "log": False,
         "motd": ["This is a private demo: nothing leaves your browser.",
                  "Log in as guest, register, or use sysop / sysop for the sysop tools."],
-        "features": {"files": False, "apps": True, "games": True, "elections": True, "guests": True},
+        "features": {"files": False, "apps": True, "games": True, "elections": True, "guests": True, "news": False},
         "apps": ["calculator", "calendar"],
         "games": ["adventure", "hangman", "robots", "snake", "sudoku", "chess", "minesweeper", "solitaire"],
         "modem": {"baud": int(opts.get("baud", 0)), "ask": False, "handshake": True},
