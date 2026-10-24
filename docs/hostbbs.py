@@ -1370,6 +1370,16 @@ TRIVIA = [  # question, the right answer, three wrong ones (the order is shuffle
 ]
 
 
+def history_pool():
+    """Every history line and fact, in a fixed order (what `op sf` chooses from)."""
+    return [v for _, v in sorted(HISTORY.items())] + list(FACTS)
+
+
+def daily_seed(now=None):
+    d = now or time.localtime()
+    return d.tm_year * 400 + d.tm_yday
+
+
 def tr_present(entry, seed=None):
     """(question, options, index of the right one), options shuffled (the same way for the same seed)."""
     q, right, wrong = entry
@@ -1414,6 +1424,27 @@ class BBSMore:
             pass
 
     # ---- counting
+    def daily_picks(self, now=None):
+        """(fortune index, history pool index) shown today: the operator's pick (`op sf`), else by date.
+        The history index is None when today's own date entry is used."""
+        now = now or time.localtime()
+        pick = self.meta.get("daily_pick") or {}
+        if pick.get("date") != time.strftime("%Y-%m-%d", now):
+            pick = {}
+        f = pick.get("fortune")
+        h = pick.get("history")
+        return (f if f is not None else daily_seed(now) % len(FORTUNES)), h
+
+    def daily_texts(self, now=None):
+        now = now or time.localtime()
+        f, h = self.daily_picks(now)
+        pool = history_pool()
+        if h is not None:
+            history = pool[h % len(pool)]
+        else:
+            history = HISTORY.get((now.tm_mon, now.tm_mday)) or FACTS[daily_seed(now) % len(FACTS)]
+        return FORTUNES[f % len(FORTUNES)], history
+
     def month_key(self, ts=None):
         return time.strftime("%Y-%m", time.localtime(ts))
 
@@ -3011,8 +3042,7 @@ class ExtrasMixin:
         await self.readline(self.c("gray", "\n[Enter to continue]"))
 
     def daily_seed(self):
-        d = time.localtime()
-        return d.tm_year * 400 + d.tm_yday
+        return daily_seed()
 
     def update_streak(self):
         u = self.user_rec()
@@ -3034,8 +3064,7 @@ class ExtrasMixin:
         seed = self.daily_seed()
         now = time.localtime()
         tips = list(self.cfg.get("tips") or []) + TIPS
-        fortune = FORTUNES[seed % len(FORTUNES)]
-        history = HISTORY.get((now.tm_mon, now.tm_mday)) or FACTS[seed % len(FACTS)]
+        fortune, history = self.bbs.daily_texts(now)
         await self.header("Today, " + time.strftime("%A %d %B %Y"))
         await self.send("  %s %s\n" % (self.c("byellow", "Fortune:"), fortune))
         await self.send("  %s %s\n" % (self.c("byellow", "Tip:"), tips[seed % len(tips)]))
@@ -3461,6 +3490,46 @@ FORTUNES = [
     "Hint: the answer is usually in the log.",
     "May your pings be low and your uptime high.",
     "Learn one new command today.",
+    "Your next call will connect on the first ring.",
+    "A backup in the hand is worth two on the disk that just failed.",
+    "The best interface is the one that fits in 80 columns.",
+    "You will soon receive mail from someone who has been meaning to write.",
+    "Somebody's oneliner will make you smile today.",
+    "Patience: the download is at 99%, and has been for a while.",
+    "Fix the bug, not the blame.",
+    "Ctrl-C is not a failure; it is a decision.",
+    "A clean prompt is a clear mind.",
+    "Even a 300 baud message arrives.",
+    "Today is a good day to read the readme.",
+    "The file you want is in the other directory.",
+    "Enjoy the quiet: the boards will be busy tomorrow.",
+    "Someone will answer your question before you finish asking it.",
+    "Trust the checksum.",
+    "Don't panic; check the logs.",
+    "A short post well made beats a long one half read.",
+    "Your high score is closer than it looks.",
+    "Be the sysop you wish to call.",
+    "The best time to document it was when you wrote it. The second best is now.",
+    "Good manners compress well.",
+    "A quiet line is not a dead line.",
+    "May all your sectors be good.",
+    "Leave the board a little tidier than you found it.",
+    "You will find what you are looking for in the last place you check, because then you stop.",
+    "Speed is nice. Reliability is nicer.",
+    "Never underestimate the power of a good welcome screen.",
+    "The cursor knows what you will type next. It is not telling.",
+    "Somewhere, someone is stuck on the last letter in Hangman. Be kind.",
+    "An unread message is a small adventure.",
+    "The modem screeches because it is excited to meet you.",
+    "Today's goal: one new command.",
+    "Plan for the power cut.",
+    "A good password is long, strange and yours alone.",
+    "Take a break. The BBS will still be here.",
+    "Beware of anything that needs just one more reboot.",
+    "Small steps compile.",
+    "If at first you don't succeed, read the error message.",
+    "The best feature is the one your callers actually use.",
+    "Keep your lines short and your uptime long.",
 ]
 
 TIPS = [
@@ -3476,30 +3545,62 @@ TIPS = [
     "The Hall lists every achievement and how to earn it.",
 ]
 
-HISTORY = {  # (month, day): what happened
-    (1, 1): "1983: the ARPANET switched to TCP/IP, the day many call the birthday of the Internet.",
-    (1, 9): "2007: Steve Jobs introduced the iPhone.",
-    (1, 24): "1984: Apple introduced the Macintosh.",
-    (2, 14): "1946: ENIAC, one of the first general-purpose computers, was unveiled.",
-    (3, 12): "1989: Tim Berners-Lee wrote his proposal for the World Wide Web.",
-    (3, 14): "Pi day: 3.14159 26535 89793...",
-    (4, 1): "1976: Apple Computer was founded.",
-    (4, 4): "1975: Microsoft was founded.",
-    (4, 7): "1964: IBM announced the System/360 family of computers.",
-    (4, 12): "1961: Yuri Gagarin became the first human in space.",
-    (5, 11): "1997: IBM's Deep Blue beat Garry Kasparov in a chess match.",
-    (6, 7): "1954: Alan Turing died.",
-    (6, 23): "1912: Alan Turing was born.",
-    (7, 20): "1969: Apollo 11 landed on the Moon.",
-    (8, 6): "1991: the first website went public.",
-    (8, 12): "1981: IBM introduced the Personal Computer.",
-    (8, 25): "1991: Linus Torvalds announced his new operating system, Linux.",
-    (9, 9): "1947: a moth stuck in Harvard's Mark II gave us the word 'bug'.",
-    (10, 4): "1957: the Soviet Union launched Sputnik 1.",
-    (10, 29): "1969: the first message was sent over the ARPANET.",
-    (11, 20): "1985: Microsoft released Windows 1.0.",
+HISTORY = {  # (month, day): what happened (each line checked against Wikipedia and the Computer History Museum)
+    (1, 1): '1983: the ARPANET switched to TCP/IP, the day many call the birthday of the Internet.',
+    (1, 3): '1977: Apple Computer, Inc. was incorporated.',
+    (1, 9): '2007: Steve Jobs introduced the iPhone.',
+    (1, 15): '2001: Wikipedia went online.',
+    (1, 24): '1984: Apple introduced the Macintosh.',
+    (1, 31): '1958: the United States launched its first satellite, Explorer 1.',
+    (2, 4): '2004: Facebook was launched at Harvard.',
+    (2, 14): '1946: ENIAC, one of the first general-purpose computers, was unveiled.',
+    (2, 20): '1962: John Glenn became the first American to orbit the Earth.',
+    (3, 10): '1876: Alexander Graham Bell made the first telephone call.',
+    (3, 12): '1989: Tim Berners-Lee proposed the World Wide Web to CERN.',
+    (3, 14): 'Pi day: 3.14159 26535 89793...',
+    (3, 15): '1985: symbolics.com became the first registered .com domain name.',
+    (3, 16): '1926: Robert Goddard launched the first liquid-fueled rocket.',
+    (3, 18): '1965: Alexei Leonov made the first spacewalk.',
+    (4, 1): '1976: Apple Computer was founded.',
+    (4, 4): '1975: Microsoft was founded.',
+    (4, 7): '1964: IBM announced the System/360 family of computers.',
+    (4, 12): '1961: Yuri Gagarin became the first human in space.',
+    (4, 13): '1970: an oxygen tank exploded on Apollo 13, almost 56 hours into the flight.',
+    (4, 21): '1993: the Mosaic web browser, version 1.0, was released.',
+    (4, 30): '1993: CERN put the World Wide Web software in the public domain.',
+    (5, 5): '1961: Alan Shepard became the first American in space.',
+    (5, 11): "1997: IBM's Deep Blue beat Garry Kasparov in a six-game chess match.",
+    (5, 22): '1973: Bob Metcalfe wrote the memo that described Ethernet.',
+    (5, 24): "1844: Samuel Morse sent 'What hath God wrought' over the first telegraph line, from Washington to Baltimore.",
+    (6, 7): '1954: Alan Turing died.',
+    (6, 10): '1977: the Apple II went on sale.',
+    (6, 16): '1963: Valentina Tereshkova became the first woman in space.',
+    (6, 23): '1912: Alan Turing was born.',
+    (7, 1): '1979: Sony introduced the Walkman.',
+    (7, 4): '1997: Mars Pathfinder landed on Mars.',
+    (7, 20): '1969: Apollo 11 landed on the Moon.',
+    (8, 6): '1991: Tim Berners-Lee posted a summary of the World Wide Web project, making the Web public.',
+    (8, 12): '1981: IBM introduced the Personal Computer.',
+    (8, 24): '1995: Microsoft released Windows 95.',
+    (8, 25): '1991: Linus Torvalds announced his new operating system, Linux.',
+    (9, 4): '1998: Larry Page and Sergey Brin incorporated Google.',
+    (9, 9): "1947: operators of Harvard's Mark II taped a moth found in a relay into their log: 'First actual case of bug being found.'",
+    (9, 12): '1958: Jack Kilby demonstrated the first integrated circuit.',
+    (9, 17): '1991: Linux 0.01, the first version of the kernel, was released.',
+    (10, 1): '1958: NASA began operations.',
+    (10, 4): '1957: the Soviet Union launched Sputnik 1.',
+    (10, 5): '2011: Steve Jobs died.',
+    (10, 23): '2001: Apple introduced the iPod.',
+    (10, 25): '2001: Microsoft released Windows XP.',
+    (10, 29): '1969: the first message was sent over the ARPANET.',
+    (11, 3): '1957: Sputnik 2 carried the dog Laika into orbit.',
+    (11, 20): '1985: Microsoft released Windows 1.0.',
+    (12, 2): '1942: Chicago Pile-1 achieved the first controlled nuclear chain reaction.',
     (12, 9): "1968: Douglas Engelbart gave the 'Mother of All Demos'.",
-    (12, 10): "1815: Ada Lovelace was born.",
+    (12, 10): '1815: Ada Lovelace was born.',
+    (12, 17): '1903: the Wright brothers made the first powered flights.',
+    (12, 20): '1990: the first web pages, describing the World Wide Web project itself, were published at CERN.',
+    (12, 21): '1968: Apollo 8 launched on the first crewed flight to the Moon.',
 }
 FACTS = [
     "The first BBS, CBBS, went online in Chicago in February 1978.",
@@ -3570,6 +3671,7 @@ class Ops:
   poll list | close ID | delete ID
   election start [days] | end | status | candidate USER
   lock | unlock              refuse (or allow) new logins
+  sf [fortune|history|both] [N|show|reset]   switch today's fortune and/or history line for everyone
   reload                     read the config file again and apply it now
   schedule add HH:MM MESSAGE [--days daily|weekdays|weekends|mon,fri|MM-DD] [--mode force|broadcast|room:NAME]
   schedule list | remove ID  timed messages (also: "schedule" in the config file)"""
@@ -3729,6 +3831,49 @@ class Ops:
         return True, "logins are open"
 
     # ---- deputies, polls, elections
+    def c_sf(self, args):
+        """sf [fortune|history|both] [N|reset|show]: switch today's fortune and/or history line for everyone."""
+        b, rest, what = self.bbs, list(args), "both"
+        if rest and rest[0].lower() in ("fortune", "history", "both"):
+            what = rest.pop(0).lower()
+        arg = rest[0].lower() if rest else ""
+        now = time.localtime()
+        today = time.strftime("%Y-%m-%d", now)
+        pick = dict(b.meta.get("daily_pick") or {})
+        if pick.get("date") != today:
+            pick = {"date": today}
+        pool = history_pool()
+        cur_f, cur_h = b.daily_picks(now)
+        if cur_h is None:
+            own = HISTORY.get((now.tm_mon, now.tm_mday)) or FACTS[daily_seed(now) % len(FACTS)]
+            cur_h = pool.index(own) if own in pool else -1
+
+        def choose(cur, n):
+            if arg.isdigit():
+                return (int(arg) - 1) % n
+            i = secrets.randbelow(n)
+            while n > 1 and i == cur:
+                i = secrets.randbelow(n)
+            return i
+        if arg == "reset":
+            for k in (("fortune", "history") if what == "both" else (what,)):
+                pick.pop(k, None)
+        elif arg != "show":
+            if what in ("fortune", "both"):
+                pick["fortune"] = choose(cur_f, len(FORTUNES))
+            if what in ("history", "both"):
+                pick["history"] = choose(cur_h, len(pool))
+        if arg != "show":
+            b.meta["daily_pick"] = pick
+            b.save("meta", b.meta)
+            b.log("sf %s %s" % (what, arg))
+        fortune, history = b.daily_texts(now)
+        f, h = b.daily_picks(now)
+        return True, "Fortune #%d of %d: %s\nHistory: %s\n(%s)" % (
+            f % len(FORTUNES) + 1, len(FORTUNES), fortune, history,
+            "everyone sees these today; `hostbbs op sf reset` goes back to the usual pick" if pick.get("fortune") is not None or pick.get("history") is not None
+            else "the usual pick for today")
+
     def c_reload(self, args):
         return self.bbs.reload()
 
