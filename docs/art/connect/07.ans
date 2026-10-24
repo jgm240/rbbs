@@ -1,0 +1,20 @@
+
+    [0;1mrBBS System BIOS v2.03   (C) 1989 Retro Systems, Inc.[0m
+
+    32-bit CPU at 33MHz
+    [0;1;32mMemory Test :  4096K OK[0m
+
+    Primary Master  : 40MB hard disk
+    Primary Slave   : None
+    Floppy A: 1.2M 5.25"    Floppy B: 1.44M 3.5"
+    COM1: 2F8h (modem, 2400 baud)   LPT1: 378h
+
+    [0;1;33mPress DEL to enter SETUP[0m
+
+    Booting from C: ...
+    [0;1;32mStarting rBBS...[0m
+    [0;1;32mCONNECT 2400[0m
+
+    [0;1;36mDial in, log on, hang out. EVEN ON '90S PCs [0;1;32m€[0m
+
+

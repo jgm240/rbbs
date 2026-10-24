@@ -1,0 +1,10 @@
+# your own BBS: never commit these
+data/
+hostbbs.json
+bbs_data/
+art-backup*/
+hostbbs-1.1-original
+ansdec
+.DS_Store
+__pycache__/
+*.tmp

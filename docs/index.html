@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rBBS - a bulletin board system for your browser and your server</title>
+<meta name="description" content="rBBS is a retro bulletin board system in one Python file: boards, chat, games, multiplayer, voting, ANSI art. Dial into a demo that runs in your browser, or run your own.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23000'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' font-weight='700' text-anchor='middle' fill='%2355ffff'%3Er%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="vendor/xterm.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1 class="logo" aria-label="rBBS"><span>r</span><span>B</span><span>B</span><span>S</span></h1>
+  <p class="tag">Dial in, log on, hang out. A bulletin board system in a single Python file.</p>
+  <nav class="cta" aria-label="Main">
+    <a class="btn primary" href="#demo">Dial in</a>
+    <a class="btn" href="#features">What it does</a>
+    <a class="btn" href="#run">Run your own</a>
+    <a class="btn" href="https://github.com/jgm240/rbbs">GitHub</a>
+  </nav>
+</header>
+
+<section id="demo">
+  <h2>Dial in</h2>
+  <p>This page has a terminal. Pick the demo and a private copy of the whole BBS starts right here in your browser (Python, compiled to WebAssembly), or point the terminal at a live server.</p>
+  <div id="screen">
+    <div id="options">
+      <fieldset class="modes"><legend>Where to connect</legend>
+        <label><input type="radio" name="mode" value="local" checked> Demo BBS (runs in your browser)</label>
+        <label><input type="radio" name="mode" value="live"> A live server</label>
+      </fieldset>
+      <span id="local-opts">
+        <label>Modem speed
+          <select id="baud">
+            <option value="0">full speed</option><option value="300">300 baud</option><option value="1200">1200 baud</option>
+            <option value="2400">2400 baud</option><option value="9600">9600 baud</option><option value="14400">14400 baud</option>
+          </select></label>
+        <label><input type="checkbox" id="music"> ANSI music</label>
+        <button class="link" id="reset" type="button">Reset demo data</button>
+      </span>
+      <span id="live-opts" hidden>
+        <label>Server <input id="server" type="text" placeholder="wss://bbs.example.com" autocomplete="off" spellcheck="false"></label>
+      </span>
+    </div>
+    <div id="term" aria-label="BBS terminal"></div>
+    <div class="bar">
+      <button id="dial" class="primary" type="button">Dial in</button>
+      <button id="hangup" type="button" hidden>Hang up</button>
+      <span id="status" role="status">Not connected</span>
+    </div>
+  </div>
+  <p class="hint">In the demo, log in as <b>guest</b>, register your own handle, or use <b>sysop</b> / <b>sysop</b> to try the sysop tools (force messages, polls, elections). Everything stays in this browser; the first dial-in downloads about 10 MB of Python and is quick afterwards. Chat bots keep the lobby company; multiplayer tables and the web terminal for other people need a live server.</p>
+</section>
+
+<section id="features">
+  <h2>What it does</h2>
+  <div class="grid">
+    <div class="card"><h3>Boards, mail and people</h3><p>Threaded message boards with replies and a new-since-last-call scan, private mail, a oneliner wall, and calling-card profiles.</p></div>
+    <div class="card"><h3>Chat</h3><p>Rooms with topics and passwords, <code>/roll</code> <code>/8ball</code> <code>/ignore</code> <code>/afk</code>, mention highlights, and a button to page the sysop into a private room.</p></div>
+    <div class="card"><h3>Games that need nothing installed</h3><p>Chess against a built-in engine, a cave adventure, Hangman, Robots, Snake, Sudoku, Minesweeper and Solitaire. They run inside the call.</p></div>
+    <div class="card"><h3>Multiplayer tables</h3><p>Tic-Tac-Toe, Connect Four, Battleship, Reversi, Hangman and a Word Race against other callers, with a lobby.</p></div>
+    <div class="card"><h3>Community</h3><p>Polls, sysop elections that make deputy sysops, a weekly trivia question, a ten-question quiz, a caller of the month, last callers and 30 achievements.</p></div>
+    <div class="card"><h3>Looks and sounds</h3><p>Generated ASCII banners, rotating ANSI art for connect screens, rooms and boards, holiday screens, real modem speeds, ANSI music and CP437 for classic terminals.</p></div>
+    <div class="card"><h3>Easy to run</h3><p>One file, standard library only. A setup dialog like raspi-config, hot reload, timed messages, logs, and a web terminal over WebSocket.</p></div>
+    <div class="card"><h3>Operator tools</h3><p><code>hostbbs op kick</code>, <code>ban</code>, <code>mute</code>, <code>poll</code>, <code>election</code>, and <code>force</code>: an urgent message on every caller's screen, however they are styled.</p></div>
+  </div>
+</section>
+
+<section id="gallery-section">
+  <h2>Connect screens</h2>
+  <p class="small">These are the art files the BBS rotates through, drawn from the .ans files in the repository. Each connect shows one of them, and on holidays an event screen follows.</p>
+  <div id="gallery"></div>
+</section>
+
+<section id="run">
+  <h2>Run your own</h2>
+  <p>You need Python 3.9 or newer. Nothing else.</p>
+<pre class="code">git clone https://github.com/jgm240/rbbs.git
+cd rbbs
+./hostbbs            # the setup dialog: name, art, rooms, features...
+./hostbbs run        # start it, then: telnet localhost 2323</pre>
+  <p>Operate a running BBS from another terminal:</p>
+<pre class="code">./hostbbs op who
+./hostbbs op force "Back in five minutes"
+./hostbbs op ban troll --ip</pre>
+  <h3>Put this terminal in front of your server</h3>
+  <p>Turn on the web terminal in <code>hostbbs.json</code>, allow this page, and put TLS in front of it (browsers refuse plain <code>ws://</code> from an https page, except for localhost):</p>
+<pre class="code">"websocket": {"enabled": true, "host": "127.0.0.1", "port": 8080,
+              "origins": ["https://jgm240.github.io"]}</pre>
+<pre class="code"># Caddy gets the certificate and proxies WebSockets by itself
+bbs.example.com {
+    reverse_proxy 127.0.0.1:8080
+}</pre>
+  <p>Then open <a href="?server=wss://bbs.example.com">this page with ?server=wss://bbs.example.com</a> (use your own address). The terminal connects your browser straight to that server, which sees your address like any other caller's.</p>
+  <p class="note">Telnet sends everything unencrypted, and so does a plain <code>ws://</code>. Passwords are only as private as the connection: use <code>wss://</code> for anything public.</p>
+</section>
+
+<footer>
+  <p>rBBS is <code>hostbbs</code>, free software under the GNU GPL, version 3 or later. It grew out of the BBS server in <a href="https://github.com/jgm240/kilobyte">Kilobyte</a>.
+  The terminal is <a href="https://xtermjs.org">xterm.js</a>; the demo runs on <a href="https://pyodide.org">Pyodide</a>.</p>
+  <p><a href="https://github.com/jgm240/rbbs">Source on GitHub</a></p>
+</footer>
+</div>
+<script src="vendor/xterm.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
