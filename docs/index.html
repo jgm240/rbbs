@@ -77,7 +77,9 @@
 
 <section id="run">
   <h2>Run your own</h2>
-  <p>You need Python 3.9 or newer. Nothing else.</p>
+  <p>On a Linux box with systemd, one line sets it all up: it opens the setup dialog, then installs and starts a service.</p>
+<pre class="code">curl -fsSL https://jgm240.github.io/rbbs/install.sh | sh</pre>
+  <p>Or by hand (Python 3.9 or newer, nothing else):</p>
 <pre class="code">git clone https://github.com/jgm240/rbbs.git
 cd rbbs
 ./hostbbs            # the setup dialog: name, art, rooms, features...

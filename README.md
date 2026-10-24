@@ -3,6 +3,16 @@
 A bulletin board system in one dependency-free Python 3.9+ file: boards, mail, chat, games, multiplayer,
 voting, ANSI art, and an operator console. Try it in your browser: **https://jgm240.github.io/rbbs/**
 
+## Install as a service (Linux with systemd)
+
+    curl -fsSL https://jgm240.github.io/rbbs/install.sh | sh
+
+It downloads rBBS, opens the setup dialog, sets a sysop password (shown once), installs a systemd service and
+starts it. As a normal user that is a user service in `~/.local/share/rbbs`; as root a system service in `/opt/rbbs`
+running as the user `rbbs`. Afterwards: `rbbs config | status | logs | restart | op help`.
+
+## By hand
+
     ./hostbbs            # setup dialog (raspi-config style); "Save and start" runs it
     ./hostbbs run        # start from the saved settings, then: telnet localhost 2323
     ./hostbbs op help    # kick, ban, mute, force (urgent message on every screen), polls, elections, reload...
