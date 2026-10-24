@@ -193,6 +193,13 @@
   const q = new URLSearchParams(location.search);
   if (q.get("server")) { $("#server").value = q.get("server"); document.querySelector('input[name="mode"][value="live"]').click(); }
   else if (store.get("mode", "local") === "live") document.querySelector('input[name="mode"][value="live"]').click();
+  // docs/server.json {"url": "wss://..."}: the real BBS. When set, the terminal connects there by default.
+  fetch("server.json").then((r) => (r.ok ? r.json() : null)).then((c) => {
+    if (!c || !c.url || q.get("server")) return;
+    $("#server").value = c.url;
+    if (store.get("mode", "") === "") document.querySelector('input[name="mode"][value="live"]').click();
+    document.querySelector('input[name="mode"][value="live"]').parentElement.lastChild.textContent = " The live rBBS";
+  }).catch(() => {});
   term.focus = term.focus.bind(term);
   $("#term").addEventListener("click", () => term.focus());
 
