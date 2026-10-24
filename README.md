@@ -26,6 +26,7 @@ Settings live in `~/hostbbs/hostbbs.json` (or `-c FILE`), data in `data/` next t
 - **Multiplayer tables:** Tic-Tac-Toe, Connect Four, Battleship, Reversi, Hangman, Word Race.
 - **Community:** polls, sysop elections (deputies), weekly trivia, quiz, caller of the month, statistics, 30 achievements, a Today screen.
 - **Look:** generated ASCII banners, rotating ANSI art (`art/connect`, `art/rooms/<room>`, `art/boards/<board>`, `art/events/MM-DD_name.ans`), modem speeds, ANSI music, CP437.
+- **Several sysops, settings inside the BBS:** `hostbbs op sysop add NAME` (or Sysop tools > Sysops) gives an account full sysop tools; sysops change name, art, features, rooms, boards, modem, forced-message look, timed messages and more from Sysop tools > Configure the BBS. It saves to the config file and applies at once.
 - **Running it:** hot reload (saving the config, `kill -HUP`, `hostbbs op reload`), timed messages, rotated log, styled forced messages.
 - **Web terminal:** set `"websocket": {"enabled": true, "origins": ["https://jgm240.github.io"]}` and put TLS in front (e.g. Caddy `reverse_proxy 127.0.0.1:8080`); then open the site with `?server=wss://your.host`.
 

@@ -595,8 +595,8 @@ class BBSExtras:
         u = self.users.get(name.lower())
         if not u:
             return False, "No such user."
-        if u["name"].lower() == (self.cfg["sysop"] or "").lower():
-            return False, "The sysop is not up for election."
+        if u.get("sysop") or u["name"].lower() == (self.cfg["sysop"] or "").lower():
+            return False, "A sysop is not up for election."
         need = self.cfg["election"]["min_calls"]
         if not force and u["calls"] < need:
             return False, "%s needs %d calls to stand." % (u["name"], need)
@@ -1420,7 +1420,7 @@ class BBSMore:
         rows = []
         for u in self.users.values():
             m = u.get("month", {}).get(month)
-            if not m or u["name"].lower() == (self.cfg["sysop"] or "").lower():
+            if not m or u.get("sysop") or u["name"].lower() == (self.cfg["sysop"] or "").lower():
                 continue
             pts = sum(m.get(k, 0) * w for k, w in self.POINTS.items())
             rows.append((round(pts), u["name"], m))
@@ -3543,6 +3543,7 @@ class Ops:
   say ROOM MESSAGE           speak in a chat room as the sysop
   mute USER [minutes]        stop a caller posting, chatting and mailing (default 60)
   unmute USER
+  sysop add|remove|list [USER]    more sysops: full sysop tools (the main sysop stays)
   deputy add|remove|list [USER]   deputy sysops may delete posts, kick and set topics
   poll add "QUESTION" OPTION OPTION...   open a poll
   poll list | close ID | delete ID
@@ -3607,6 +3608,8 @@ class Ops:
         args, with_ip = self.flag(args, "--ip")
         name = args[0].lower()
         b = self.bbs
+        if (b.users.get(name) or {}).get("sysop"):
+            return False, "%s is a sysop; remove that first: hostbbs op sysop remove %s" % (args[0], args[0])
         reason = clean_text(" ".join(args[1:])) or "banned by the sysop"
         b.bans["names"][name] = {"reason": reason, "ts": time.time()}
         notes = ["banned " + args[0]]
@@ -3740,6 +3743,31 @@ class Ops:
             b.save("schedule", b.sched_extra)
             return (True, "removed " + args[1]) if len(b.sched_extra["items"]) < before else (False, "no such entry (config entries are edited in the config file)")
         return False, "usage: schedule add|list|remove"
+
+    def c_sysop(self, args):
+        """sysop add|remove|list [USER]: accounts with the sysop flag may use all the sysop tools."""
+        b, sub = self.bbs, args[0].lower()
+        primary = (b.cfg["sysop"] or "").lower()
+        if sub == "list":
+            names = [u["name"] + (" (main)" if u["name"].lower() == primary else "") for u in b.users.values() if u.get("sysop")]
+            return True, ", ".join(names) or "no sysops"
+        user = b.users.get(args[1].lower())
+        if not user:
+            return False, "no such user"
+        if sub == "add":
+            user["sysop"], user["deputy"] = True, False
+        elif sub == "remove":
+            if user["name"].lower() == primary:
+                return False, "%s is the main sysop (the 'sysop' setting); change that in setup first" % user["name"]
+            user["sysop"] = False
+        else:
+            return False, "usage: sysop add|remove|list [USER]"
+        b.save("users", b.users)
+        s_ = b.find_session(user["name"])
+        if s_:
+            s_.sysop = bool(user["sysop"])
+            s_.push(s_.c("bgreen" if s_.sysop else "red", "You are %s a sysop." % ("now" if s_.sysop else "no longer")))
+        return True, "%s is %s a sysop" % (user["name"], "now" if user["sysop"] else "no longer")
 
     def c_deputy(self, args):
         b, sub = self.bbs, args[0].lower()
@@ -4299,8 +4327,7 @@ class SocialMixin:
         """A framed card for one user, as lines of text."""
         p = u.get("profile", {})
         w = 50
-        name = u["name"] + (" (sysop)" if u["name"].lower() == (self.cfg["sysop"] or "").lower() and u.get("sysop")
-                            else " (deputy)" if u.get("deputy") else "")
+        name = u["name"] + (" (sysop)" if u.get("sysop") else " (deputy)" if u.get("deputy") else "")
         online = self.bbs.find_session(u["name"])
         since = time.strftime("%Y-%m-%d", time.localtime(u["created"]))
         ach = len(u.get("ach", {}))
@@ -4593,7 +4620,159 @@ class RetroMixin:
             r = await self.chat_room(r)
 
 
-class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, MoreGamesMixin, GamesMixin):
+class ConfigMixin:
+    """Sysops change the BBS's settings from inside the BBS: saved to the config file, applied at once."""
+
+    async def cfg_pick(self, label, options, current):
+        await self.send("\n  %s\n" % self.c("bwhite", label))
+        for i, (v, lb) in enumerate(options, 1):
+            await self.send("   %s %s%s\n" % (self.c("byellow", "%2d" % i), lb, self.c("bgreen", "   <- now") if v == current else ""))
+        a = (await self.readline("Number (Enter = keep): ")).strip()
+        if a.isdigit() and 1 <= int(a) <= len(options):
+            return options[int(a) - 1][0]
+        return current
+
+    async def cfg_edit(self, target, spec):
+        key, label, kind, extra = spec
+        cur = target.get(key)
+        if kind == "bool":
+            target[key] = not cur
+        elif kind == "pick":
+            target[key] = await self.cfg_pick(label, extra, cur)
+        elif kind == "palette":
+            v = await self.cfg_pick(label, [(n, n) for n in PALETTES] + [("*", "Your own list of colors")], cur if isinstance(cur, str) else None)
+            if v == "*":
+                v = (await self.readline("Colors, comma-separated (%s): " % ", ".join(ANSI), maxlen=200)).strip() or cur
+            target[key] = v if v is not None else cur
+        elif kind == "int":
+            v = (await self.readline("%s [%s]: " % (label, cur), maxlen=9)).strip()
+            if v.isdigit():
+                target[key] = int(v)
+            elif v:
+                await self.send(self.c("red", "That is not a number.\n"))
+        else:
+            shown = " | ".join(cur) if kind == "motd" else cur
+            v = await self.readline("%s%s [%s] ('-' clears): " % (label, " (lines separated by |)" if kind == "motd" else "", shown), maxlen=300)
+            if v.strip() == "-":
+                target[key] = [] if kind == "motd" else ""
+            elif v.strip():
+                target[key] = [p.strip() for p in v.split("|") if p.strip()] if kind == "motd" else v.strip()
+
+    async def cfg_form(self, title, target, specs, extra_rows=()):
+        while True:
+            await self.header(title)
+            for i, (k, lb, kind, extra) in enumerate(specs, 1):
+                await self.send(" %s %-36s %s\n" % (self.c("byellow", "%2d" % i), lb, self.c("bcyan", UI.show(None, target.get(k), kind, extra))))
+            a = (await self.readline("\nNumber to change (Enter = back): ")).strip()
+            if not a:
+                return
+            if a.isdigit() and 1 <= int(a) <= len(specs):
+                await self.cfg_edit(target, specs[int(a) - 1])
+
+    async def cfg_features(self, raw):
+        while True:
+            await self.header("Features")
+            for i, (k, lb) in enumerate(FEATURES, 1):
+                await self.send(" %s [%s] %s\n" % (self.c("byellow", "%2d" % i), self.c("bgreen", "x") if raw["features"].get(k) else " ", lb))
+            a = (await self.readline("\nNumber to switch on or off (Enter = back): ")).strip()
+            if not a:
+                return
+            if a.isdigit() and 1 <= int(a) <= len(FEATURES):
+                k = FEATURES[int(a) - 1][0]
+                raw["features"][k] = not raw["features"].get(k)
+
+    async def cfg_list(self, title, items, specs, describe, blank):
+        while True:
+            await self.header(title)
+            for i, it in enumerate(items, 1):
+                await self.send(" %s %s\n" % (self.c("byellow", "%2d" % i), describe(it)))
+            a = (await self.readline("\nNumber to edit, + to add, - then number to delete (Enter = back): ")).strip()
+            if not a:
+                return
+            if a == "+":
+                items.append(dict(blank))
+                await self.cfg_form(title + ": new", items[-1], specs)
+            elif a.startswith("-") and a[1:].strip().isdigit() and 1 <= int(a[1:]) <= len(items):
+                del items[int(a[1:]) - 1]
+            elif a.isdigit() and 1 <= int(a) <= len(items):
+                await self.cfg_form(title, items[int(a) - 1], specs)
+            for it in items:
+                if "name" in it and title == "Chat rooms":
+                    it["name"] = re.sub(r"[^a-z0-9_-]", "", it["name"].lower()) or "room"
+
+    async def sysop_manage(self):
+        """Add or remove sysops from inside the BBS."""
+        while True:
+            await self.header("Sysops")
+            ok, who = Ops(self.bbs, True).run(["sysop", "list"])
+            await self.send("  Now: %s\n" % who)
+            cmd = (await self.readline("\n[A]dd a sysop  [R]emove one  [Q]uit\n> ")).strip().lower()[:1]
+            if cmd in ("a", "r"):
+                name = (await self.readline("Handle: ")).strip()
+                if name and await self.ask_yn("%s %s as a sysop?" % ("Make" if cmd == "a" else "Remove", name), cmd == "a"):
+                    ok, out = Ops(self.bbs, True).run(["sysop", "add" if cmd == "a" else "remove", name])
+                    await self.send(self.c("bgreen" if ok else "red", out + "\n"))
+            else:
+                return
+
+    async def sysop_config(self):
+        bbs = self.bbs
+        path = getattr(bbs, "config_path", None)
+        if not path:
+            await self.send(self.c("red", "This BBS was not started from a config file, so settings can't be saved.\n"))
+            return
+        raw = load_file(path)
+        raw["rooms"] = norm_items(raw["rooms"], "topic")
+        raw["board_list"] = norm_items(raw["board_list"], "desc")
+        snap = lambda: json.dumps(raw, sort_keys=True)
+        start = snap()
+        limits = [("idle_timeout", "Idle timeout (seconds)", "int", None), ("minutes", "Minutes per call (0 = any)", "int", None),
+                  ("max_users", "Most callers at once", "int", None), ("history", "Chat history lines", "int", None)]
+        sections = [
+            ("1", "Identity", lambda: self.cfg_form("Identity", raw, SPEC_IDENT)),
+            ("2", "ASCII art", lambda: self.cfg_form("ASCII art", raw["art"], SPEC_ART)),
+            ("3", "Colors", lambda: self.cfg_form("Colors", raw, [("color", "Color mode", "pick", PICK_COLORMODE)])),
+            ("4", "Features", lambda: self.cfg_features(raw)),
+            ("5", "Chat rooms", lambda: self.cfg_list("Chat rooms", raw["rooms"], SPEC_ROOM,
+                                                      lambda r: "#%-12s %s%s" % (r["name"], r.get("topic", ""), "  [locked]" if r.get("password") else ""),
+                                                      {"name": "newroom", "topic": "", "password": "", "guests": True})),
+            ("6", "Message boards", lambda: self.cfg_list("Message boards", raw["board_list"], SPEC_BOARD,
+                                                          lambda b: "%-16s %s" % (b["name"], b.get("desc", "")), {"name": "New board", "desc": ""})),
+            ("7", "Forced messages", lambda: self.cfg_form("Forced messages", raw["force"], SPEC_FORCE)),
+            ("8", "Modem", lambda: self.cfg_form("Modem", raw["modem"], SPEC_MODEM)),
+            ("9", "ANSI music", lambda: self.cfg_form("ANSI music", raw["music"], SPEC_MUSIC)),
+            ("A", "Voting & elections", lambda: self.cfg_form("Voting & elections", raw["election"], SPEC_ELECT)),
+            ("B", "Events & hours", lambda: self.cfg_form("Events & hours", raw, SPEC_EVENTS)),
+            ("C", "Timed messages", lambda: self.cfg_list("Timed messages", raw["schedule"], SPEC_SCHED,
+                                                          lambda i: "%s %-9s %-9s %s" % (i.get("at", ""), i.get("days", "daily"), i.get("mode", ""), str(i.get("message", ""))[:36]),
+                                                          {"at": "22:00", "days": "daily", "mode": "broadcast", "message": ""})),
+            ("D", "Limits", lambda: self.cfg_form("Limits", raw, limits)),
+            ("E", "Art rotation", lambda: self.cfg_form("Art rotation", raw, [("art_dir", "Art folder", "str", None), ("art_rotation", "Rotation", "pick", PICK_ROT)])),
+        ]
+        while True:
+            self.where = "Configuring"
+            await self.header("Settings" + ("  (unsaved changes)" if snap() != start else ""))
+            for k, label, _ in sections:
+                await self.send("  [%s] %s\n" % (self.c("byellow", k), label))
+            await self.send("  [%s] Save and apply    [%s] Quit\n" % (self.c("byellow", "S"), self.c("byellow", "Q")))
+            await self.send(self.c("gray", "  (address, port, data folder and the web terminal are set in the setup dialog on the server)\n"))
+            k = (await self.readline("\nsettings> ")).strip().upper()[:1]
+            sec = next((s for s in sections if s[0] == k), None)
+            if sec:
+                await sec[2]()
+            elif k == "S":
+                path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n")
+                start = snap()
+                ok, msg = bbs.reload()
+                bbs.log("settings saved by %s: %s" % (self.name, msg))
+                await self.send(self.c("bgreen" if ok else "red", msg + ".\n"))
+            elif k == "Q" or not k:
+                if snap() != start and await self.ask_yn("Quit without saving?", False) is False:
+                    continue
+                return
+
+
+class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, MoreGamesMixin, GamesMixin):
     def __init__(self, bbs, reader, writer):
         self.bbs, self.r, self.w = bbs, reader, writer
         self.cfg = bbs.cfg
@@ -4902,7 +5081,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, MoreGamesMixin, G
             if bbs.find_session(user["name"]):
                 await self.send(self.c("red", "That account is already logged in.\n"))
                 continue
-            is_sysop = low == self.cfg["sysop"].lower() and bool(user.get("sysop"))
+            is_sysop = bool(user.get("sysop"))
             if bbs.bans.get("locked") and not is_sysop:
                 await self.send(self.c("red", "Logins are closed right now.\n"))
                 raise Quit
@@ -5633,7 +5812,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, MoreGamesMixin, G
         bbs = self.bbs
         while True:
             await self.header("Sysop tools" if self.sysop else "Deputy tools")
-            opts = "[K]ick user  " + ("[B]roadcast  [F]orce a message  [O]p command (type help)  " if self.sysop else "") + "[Q]uit"
+            opts = "[K]ick user  " + ("[B]roadcast  [F]orce a message  [C]onfigure the BBS  [S]ysops  [O]p command (type help)  " if self.sysop else "") + "[Q]uit"
             cmd = (await self.readline(opts + "\n> ")).strip().lower()[:1]
             if cmd == "q" or not cmd:
                 return
@@ -5646,6 +5825,10 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, MoreGamesMixin, G
                 if text:
                     ok, out = Ops(bbs, True).run(["force", text])
                     await self.send(out + "\n")
+            elif cmd == "c" and self.sysop:
+                await self.sysop_config()
+            elif cmd == "s" and self.sysop:
+                await self.sysop_manage()
             elif cmd == "o" and self.sysop:
                 line = (await self.readline("op> ", maxlen=300)).strip()
                 try:
@@ -6505,6 +6688,7 @@ async def serve(cfg, loader=None, watch=None):
     sys.stdout.reconfigure(line_buffering=True)
     bbs = BBS(cfg)
     bbs.loader = loader
+    bbs.config_path = Path(watch) if watch else None
     sysop_pw = await bbs.ensure_sysop()
     bbs.log("hostbbs %s started" % VERSION)
 
