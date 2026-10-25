@@ -29,7 +29,17 @@ Settings live in `~/hostbbs/hostbbs.json` (or `-c FILE`), data in `data/` next t
 - **Look:** generated ASCII banners, rotating ANSI art (`art/connect`, `art/rooms/<room>`, `art/boards/<board>`, `art/events/MM-DD_name.ans`), modem speeds, ANSI music, CP437.
 - **Today screen:** 64 fortunes and 55 dated history lines (each checked against Wikipedia and the Computer History Museum). `hostbbs op sf` switches today's fortune and history line for everyone (`sf fortune`, `sf history`, `sf 5`, `sf show`, `sf reset`).
 - **Several sysops, settings inside the BBS:** `hostbbs op sysop add NAME` (or Sysop tools > Sysops) gives an account full sysop tools; sysops change name, art, features, rooms, boards, modem, forced-message look, timed messages and more from Sysop tools > Configure the BBS. It saves to the config file and applies at once.
-- **Running it:** hot reload (saving the config, `kill -HUP`, `hostbbs op reload`), timed messages, rotated log, styled forced messages.
+- **Running it:** hot reload (saving the config, `kill -HUP`, `hostbbs op reload`), timed messages, styled forced messages,
+  `hostbbs op restart` (callers are told first), and `hostbbs op update` (or `hostbbs update`, or `op update` typed by a
+  sysop in the BBS): the newest hostbbs from this repository, checked, the old one kept as `hostbbs.old`, then a restart.
+- **Log:** `data/hostbbs.log` (rotated) and the console: logins, operator commands, and what callers do in public
+  (`anna went into Message boards`, `anna [#random] hi`, posts). Private mail, private messages and pages to the sysop
+  are never logged; callers are told at the door.
+- **Kids mode and Parent mode:** callers say their age, and every feature has a youngest age; rooms and boards can be
+  for kids, teens, under-18s or adults only; adults and under-18s can't write to each other privately or sit at the same
+  table; kids under 13 are hidden from other adults; rude words are hidden from the young. Parents make their children's
+  accounts (Family), may always write to them, approve who else may, or keep a child to family only. Ages are what
+  callers say; they are not checked.
 - **Web terminal:** set `"websocket": {"enabled": true, "origins": ["https://jgm240.github.io"]}` and put TLS in front (e.g. Caddy `reverse_proxy 127.0.0.1:8080`); then open the site with `?server=wss://your.host`.
 
 `python3 tools/build_site.py` refreshes `docs/` (the GitHub Pages site, which runs this same file in the browser through Pyodide).

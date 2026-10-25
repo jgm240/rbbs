@@ -139,7 +139,22 @@ DEFAULTS = {
     "news": {"custom": True, "per_user": 8, "cache_minutes": 15, "allow_private": False},  # callers may add own feeds
     "paste": {"per_user": 50, "max_lines": 300},
     "trivia_file": "",  # your own questions: [{"q": "...", "a": ["right", "wrong", "wrong", "wrong"]}]
-    "log": True,  # data/hostbbs.log: logins, bans, operator commands (rotated)
+    "log": True,  # data/hostbbs.log: logins, bans, operator commands (rotated), and what callers do
+                  # in public (menus, chat rooms, posts); never private mail or private messages
+    "log_echo": True,  # the same lines on the console (the journal, for a service)
+    # Kids mode: callers say their age, and the features they get go by it.
+    # Parent mode: parents make their children's accounts and choose who else
+    # may write to them.
+    "kids": {
+        "enabled": False,
+        "join_age": 0,  # the youngest who may call
+        "filter_under": 18,  # rude words are hidden from callers younger than this
+        "words": [],  # more words to hide
+        "parents": True,  # Parent mode (with Kids mode)
+        "min_age": {"boards": 0, "post": 0, "mail": 13, "pm": 13, "chat": 0, "files": 0, "games": 0,
+                    "apps": 0, "multiplayer": 0, "pastebin": 0, "news": 0, "oneliners": 0, "profiles": 0},
+    },
+    "update_url": "",  # where `op update` gets the newest hostbbs (empty: rBBS's repository on GitHub)
     "force": {  # how `hostbbs op force` messages look on the caller's screen
         "title": "!! MESSAGE FROM THE SYSOP !!",  # empty: no title
         "style": "block",  # block (filled) | box (framed) | line (one line)
@@ -308,11 +323,93 @@ def norm_items(items, extra_key):
     return out
 
 
+# ---- Kids mode ------------------------------------------------------------------------------------
+# Who a room or a board is for.
+AGES = [("all", "Everyone"), ("kids", "Kids only (under 13)"), ("teens", "Teens only (13 to 17)"),
+        ("minors", "Under 18 only"), ("adults", "18 and up")]
+KID, ADULT = 13, 18
+# Hidden from callers under kids.filter_under (the sysop can add more words).
+RUDE = ["fuck", "fucker", "fucking", "motherfucker", "shit", "shitty", "bullshit", "bitch", "bastard",
+        "asshole", "arsehole", "cunt", "dick", "dickhead", "piss", "pissed", "crap", "slut", "whore",
+        "wanker", "twat", "bollocks", "prick", "cock", "pussy", "porn", "nazi", "retard", "fag", "faggot"]
+
+
+def age_fits(age, ages):
+    """Is someone of this age (None: not known) let in where `ages` says?"""
+    if ages in (None, "", "all"):
+        return True
+    if age is None:
+        return ages == "adults"
+    return {"kids": age < KID, "teens": KID <= age < ADULT, "minors": age < ADULT,
+            "adults": age >= ADULT}.get(ages, True)
+
+
+# ---- updating: the newest hostbbs from rBBS's repository -------------------------------------------
+UPDATE_URL = "https://raw.githubusercontent.com/jgm240/rbbs/main/hostbbs"
+# Where the BBS may not change its own program (Kilobyte), it asks for an
+# update by making this file; a service of the system does it.
+UPDATE_REQUEST = os.environ.get("HOSTBBS_UPDATE_REQUEST", "")
+
+
+def fetch_update(url=None):
+    """The newest hostbbs: (version, its text), checked to be a whole one."""
+    req = urllib.request.Request(url or UPDATE_URL, headers={"User-Agent": "hostbbs/" + VERSION})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = r.read(4_000_001)
+    if len(data) > 4_000_000:
+        raise ValueError("too big to be hostbbs")
+    text = data.decode("utf-8")
+    m = re.search(r'^VERSION = "([0-9.]+)"', text, re.M)
+    if not m or "def main(" not in text or not text.startswith("#!/usr/bin/env python3"):
+        raise ValueError("that is not hostbbs")
+    compile(text, "hostbbs", "exec")  # (it must at least be whole Python)
+    return m.group(1), text
+
+
+def program_path():
+    me = sys.argv[0] if sys.argv and os.path.basename(sys.argv[0]).startswith("hostbbs") else __file__
+    return os.path.realpath(me)
+
+
+def self_update(url=None):
+    """Replace this program with the newest one. Returns a sentence for people."""
+    version, text = fetch_update(url)
+    me = program_path()
+    with open(me, encoding="utf-8") as f:
+        if f.read() == text:
+            return "hostbbs %s is the newest already." % VERSION
+    if not os.access(me, os.W_OK) or not os.access(os.path.dirname(me), os.W_OK):
+        raise PermissionError("this hostbbs (%s) may not be changed by its user" % me)
+    st = os.stat(me)
+    tmp = me + ".new"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.chmod(tmp, st.st_mode)
+    if os.geteuid() == 0:  # (an update by root keeps the file the service user's)
+        os.chown(tmp, st.st_uid, st.st_gid)
+    try:
+        os.replace(me, me + ".old")  # (the one before is kept)
+    except OSError:
+        pass
+    os.replace(tmp, me)
+    return "hostbbs %s is installed (it was %s)." % (version, VERSION)
+
+
 def normalize(cfg):
     cfg["rooms"] = norm_items(cfg["rooms"], "topic")
     for r in cfg["rooms"]:
         r["name"] = re.sub(r"[^a-z0-9_-]", "", r["name"].lower()) or "room"
     cfg["board_list"] = norm_items(cfg["board_list"], "desc")
+    for it in cfg["rooms"] + cfg["board_list"]:
+        if it.get("ages") not in dict(AGES):
+            it["ages"] = "all"
+    k = cfg["kids"]
+    k["words"] = [w.strip().lower() for w in (k.get("words") or []) if str(w).strip()]
+    for key, v in list(k["min_age"].items()):
+        try:
+            k["min_age"][key] = max(0, int(v))
+        except (TypeError, ValueError):
+            k["min_age"][key] = 0
     colors = cfg["art"]["colors"]
     if isinstance(colors, str):
         colors = PALETTES.get(colors) or [c.strip() for c in colors.split(",")]
@@ -1413,13 +1510,22 @@ class BBSMore:
                 self.log_handler = None
 
     def log(self, event):
-        """One line in data/hostbbs.log (rotated at 512 KB, three old files kept)."""
+        """One line in data/hostbbs.log (rotated at 512 KB, three old files kept), and on the
+        console. Private mail and private messages never come here."""
+        if not self.cfg.get("log", True):
+            return
+        line = "%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), "".join(c for c in str(event) if printable(c)))
+        if self.cfg.get("log_echo", True):
+            try:
+                print(line, flush=True)
+            except (OSError, ValueError):
+                pass
         h = self.log_handler
         if not h:
             return
         try:
             import logging
-            h.emit(logging.LogRecord("hostbbs", logging.INFO, "", 0, "%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), event), (), None))
+            h.emit(logging.LogRecord("hostbbs", logging.INFO, "", 0, line, (), None))
         except Exception:
             pass
 
@@ -1631,6 +1737,7 @@ class Room:
         self.topic = spec.get("topic", "")
         self.password = spec.get("password", "")
         self.guests = spec.get("guests", True)
+        self.ages = spec.get("ages", "all")
         self.members = set()
         self.history = deque(maxlen=history)
         self.count = 0
@@ -1729,6 +1836,97 @@ class BBS(BBSExtras, BBSMore, BBSReach):
         self.meta["sysop_marked"] = True
         self.save("meta", self.meta)
         return pw
+
+    # ---- kids and families ----------------------------------------------
+    def age_of(self, name):
+        """A user's age (from the birth year), or None if not known."""
+        u = self.users.get((name or "").lower())
+        if not u or u.get("born") is None:
+            return None
+        return time.localtime().tm_year - int(u["born"])
+
+    def is_sysop(self, name):
+        u = self.users.get((name or "").lower())
+        return bool(u and u.get("sysop"))
+
+    def family(self, a, b):
+        """Parent and child, or a child and someone their parent approved."""
+        k = self.cfg["kids"]
+        if not k["enabled"] or not k.get("parents"):
+            return False
+        ua, ub = self.users.get(a.lower(), {}), self.users.get(b.lower(), {})
+        low = lambda lst: [x.lower() for x in lst or []]
+        return (a.lower() in low(ub.get("parents")) or b.lower() in low(ua.get("parents")) or
+                a.lower() in low(ub.get("approved")) or b.lower() in low(ua.get("approved")))
+
+    def children(self, parent):
+        return sorted(u["name"] for u in self.users.values()
+                      if parent.lower() in [p.lower() for p in u.get("parents") or []])
+
+    def may_meet(self, a, a_age, b, b_age):
+        """With Kids mode, adults and under-18s are kept apart (private contact, tables),
+        except family. The sysops may always."""
+        if not self.cfg["kids"]["enabled"] or self.is_sysop(a) or self.is_sysop(b):
+            return True
+        if self.family(a, b):
+            return True
+        for name in (a, b):
+            if self.users.get(name.lower(), {}).get("family_only"):
+                return False
+        minor = lambda age: age is not None and age < ADULT
+        return minor(a_age) == minor(b_age)
+
+    def may_contact(self, a, a_age, b, b_age, what):
+        """May a write privately to b (what: "mail" or "pm")? Both must also be old enough
+        for it, unless they are family."""
+        if not self.may_meet(a, a_age, b, b_age):
+            return False
+        k = self.cfg["kids"]
+        if not k["enabled"] or self.is_sysop(a) or self.is_sysop(b) or self.family(a, b):
+            return True
+        need = k["min_age"].get(what, 0)
+        return (a_age if a_age is not None else ADULT) >= need and (b_age if b_age is not None else ADULT) >= need
+
+    def rude_re(self):
+        words = RUDE + self.cfg["kids"].get("words", [])
+        key = tuple(words)
+        if getattr(self, "_rude_key", None) != key:
+            self._rude_key = key
+            self._rude = re.compile(r"\b(?:%s)(?:s|es|ed|er|ers|ing|y)?\b" % "|".join(
+                re.escape(w) for w in sorted(set(words), key=len, reverse=True)), re.I)
+        return self._rude
+
+    async def restart(self, by, why="The BBS restarts now"):
+        """Tell everyone, hang up, and start this program again (in the same process)."""
+        self.log("restart by %s" % by)
+        self.broadcast(paint("[SYSOP] %s: call again in a moment." % why, "bred"))
+        await asyncio.sleep(3)
+        for sess in list(self.sessions):
+            try:
+                sess.w.close()
+            except OSError:
+                pass
+        await asyncio.sleep(0.5)
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, program_path()] + sys.argv[1:])
+
+    async def update(self, by):
+        """op update: the newest hostbbs, then a restart with it."""
+        if UPDATE_REQUEST:
+            # (In Kilobyte: a service of the system installs it and restarts the BBS.)
+            with open(UPDATE_REQUEST, "w") as f:
+                f.write(by + "\n")
+            self.log("update asked for by %s" % by)
+            return "Asked for the newest hostbbs: the BBS restarts by itself if there is a new one."
+        try:
+            msg = await asyncio.get_running_loop().run_in_executor(None, self_update, self.cfg.get("update_url") or None)
+        except (OSError, ValueError, SyntaxError, UnicodeDecodeError) as e:
+            self.log("update by %s did not work: %s" % (by, e))
+            return "The update did not work: %s" % e
+        self.log("update by %s: %s" % (by, msg))
+        if "installed" in msg:
+            asyncio.ensure_future(self.restart(by, "The BBS restarts with a new version"))
+        return msg
 
     def write_online(self):
         """Who is on, for the sysop's tools outside the BBS (Host a BBS)."""
@@ -3034,7 +3232,8 @@ class ExtrasMixin:
     # ---- last callers, today, hall ---------------------------------------------------------------
     async def last_callers(self):
         await self.header("Last callers")
-        rows = self.bbs.meta.get("callers", [])[-15:][::-1]
+        rows = [r for r in self.bbs.meta.get("callers", [])
+                if self.sees(r["name"], self.bbs.age_of(r["name"]))][-15:][::-1]
         for r in rows:
             await self.send(" %-16s %s  stayed %s\n" % (r["name"], fdate(r["ts"]), duration(r["secs"])))
         if not rows:
@@ -3299,7 +3498,7 @@ class ExtrasMixin:
 
     def announce_table(self, t):
         for s in list(self.bbs.sessions):
-            if s is not self and s.where in ("Multiplayer lobby",):
+            if s is not self and s.where in ("Multiplayer lobby",) and self.bbs.may_meet(self.name, self.age, s.name, s.age):
                 s.push(s.c("bcyan", "[lobby] %s opened a %s table (#%d)" % (self.name, t.title, t.id)))
 
     async def multiplayer(self):
@@ -3310,7 +3509,8 @@ class ExtrasMixin:
         while True:
             self.where = "Multiplayer lobby"
             await self.header("Multiplayer games")
-            tables = [t for t in bbs.tables.values() if t.state == "waiting"]
+            tables = [t for t in bbs.tables.values() if t.state == "waiting"
+                      and all(bbs.may_meet(self.name, self.age, p.name, p.age) for p in t.players)]
             for t in tables:
                 await self.send(" %s table %d  %-13s %s  (%d/%d)\n" % (
                     self.c("byellow", "%2d" % t.id), t.id, t.title, ", ".join(p.name for p in t.players),
@@ -3331,6 +3531,8 @@ class ExtrasMixin:
                 await self.mp_play(t)
             elif k.isdigit():
                 t = bbs.tables.get(int(k))
+                if t and not all(bbs.may_meet(self.name, self.age, p.name, p.age) for p in t.players):
+                    t = None
                 if not t or t.state != "waiting" or len(t.players) >= t.max_players:
                     await self.send(self.c("red", "That table is not open.\n"))
                     continue
@@ -3393,6 +3595,8 @@ class ExtrasMixin:
         elif cmd == "seen":
             u = bbs.users.get(arg.lower())
             s = bbs.find_session(arg)
+            if u and not self.sees(u["name"], bbs.age_of(u["name"])):
+                u, s = None, None
             await self.send(("%s is online now.\n" % s.name) if s else
                             ("%s was last here %s.\n" % (u["name"], fdate(u["last"])) if u else "No such user.\n"))
         elif cmd == "history":
@@ -3414,6 +3618,8 @@ class ExtrasMixin:
             target = bbs.find_session(who)
             if not target or not game or not self.feat.get("multiplayer", True):
                 await self.send("Usage: /challenge <online user> <ttt|hangman|c4|battleship|reversi|word>\n")
+            elif not self.may("multiplayer") or not bbs.may_meet(me, self.age, target.name, target.age):
+                await self.send(self.c("red", "You can't challenge %s.\n" % target.name))
             else:
                 t = self.open_table(game)
                 target.push(target.c("bcyan", "%s challenges you to %s! Open Multiplayer (P) from the main menu "
@@ -3673,6 +3879,8 @@ class Ops:
   lock | unlock              refuse (or allow) new logins
   sf [fortune|history|both] [N|show|reset]   switch today's fortune and/or history line for everyone
   reload                     read the config file again and apply it now
+  restart                    restart the BBS (callers are told first)
+  update                     get the newest hostbbs (from rBBS on GitHub) and restart with it
   schedule add HH:MM MESSAGE [--days daily|weekdays|weekends|mon,fri|MM-DD] [--mode force|broadcast|room:NAME]
   schedule list | remove ID  timed messages (also: "schedule" in the config file)"""
 
@@ -3876,6 +4084,23 @@ class Ops:
 
     def c_reload(self, args):
         return self.bbs.reload()
+
+    def c_restart(self, args):
+        if err := self.need_live():
+            return False, err
+        asyncio.ensure_future(self.bbs.restart("the operator"))
+        return True, "restarting: callers are told, then the BBS starts again"
+
+    def c_update(self, args):
+        if not self.live:  # (not running: update the file here)
+            if UPDATE_REQUEST:
+                return False, "this BBS is updated by its system (in Kilobyte: Internet > Host a BBS > Update)"
+            try:
+                return True, self_update(self.bbs.cfg.get("update_url") or None)
+            except (OSError, ValueError, SyntaxError, UnicodeDecodeError) as e:
+                return False, "the update did not work: %s" % e
+        task = asyncio.ensure_future(self.bbs.update("the operator"))
+        return True, "getting the newest hostbbs; the BBS restarts by itself if there is one (see the log)"
 
     def c_schedule(self, args):
         b, sub = self.bbs, args[0].lower()
@@ -4461,7 +4686,7 @@ class SocialMixin:
             return
         await self.send(self.c("byellow", "  Oneliners\n"))
         for r in rows:
-            await self.send("   %s %s\n" % (self.c(self.bbs.who_color(r["name"]), "%-12s" % r["name"][:12]), r["text"]))
+            await self.send("   %s %s\n" % (self.c(self.bbs.who_color(r["name"]), "%-12s" % r["name"][:12]), self.tidy(r["text"])))
 
     async def oneliner_wall(self):
         self.where = "Oneliner wall"
@@ -4471,7 +4696,7 @@ class SocialMixin:
             rows = self.oneliners()[-15:]
             for r in rows:
                 await self.send(" %s  %s %s\n" % (self.c("gray", time.strftime("%m-%d %H:%M", time.localtime(r["ts"]))),
-                                                  self.c(bbs.who_color(r["name"]), "%-14s" % r["name"]), r["text"]))
+                                                  self.c(bbs.who_color(r["name"]), "%-14s" % r["name"]), self.tidy(r["text"])))
             if not rows:
                 await self.send("  (the wall is empty - be the first)\n")
             if self.guest:
@@ -4508,7 +4733,7 @@ class SocialMixin:
                      u.get("calls", 0), u.get("streak", 0), u.get("best_streak", 0), ach, len(ACHIEVEMENTS))),
                  row("-" * (w - 4), "gray")]
         for ln in (p.get("bio") or ["(no bio yet)"])[:4]:
-            lines.append(row(ln[: w - 4], "byellow"))
+            lines.append(row(self.tidy(ln)[: w - 4], "byellow"))
         lines.append(self.c("cyan", "╚" + "═" * (w - 2) + "╝"))
         return lines
 
@@ -4524,6 +4749,8 @@ class SocialMixin:
                 await self.edit_profile()
                 who = self.name
             u = bbs.users.get(who.lower())
+            if u and not self.sees(u["name"], bbs.age_of(u["name"])):
+                u = None
             if not u:
                 await self.send(self.c("red", "No such user.\n"))
                 continue
@@ -4583,9 +4810,18 @@ class SocialMixin:
         walk(None, 0)
         return out
 
+    def my_boards(self):
+        return [b for b in self.cfg["board_list"] if self.fits(b.get("ages", "all"))]
+
+    def my_rooms(self):
+        """The rooms this caller may see: by age, and a page room only its caller's."""
+        mine = "page-" + re.sub(r"[^a-z0-9]", "", self.name.lower())
+        return {n: r for n, r in self.bbs.rooms.items()
+                if self.fits(r.ages) and (not n.startswith("page-") or self.sysop or n == mine)}
+
     async def boards(self):
         self.where = "Message boards"
-        bl = self.cfg["board_list"]
+        bl = self.my_boards()
         while True:
             await self.header("Message boards")
             for i, b in enumerate(bl, 1):
@@ -4603,10 +4839,10 @@ class SocialMixin:
     async def show_message(self, b, msgs, msg):
         parent = next((m for m in msgs if m["id"] == msg.get("reply")), None)
         kids = [m for m in msgs if m.get("reply") == msg["id"]]
-        head = "\n%s\nFrom: %s   Date: %s" % (self.c("bwhite", msg["subject"]), msg["author"], fdate(msg["ts"]))
+        head = "\n%s\nFrom: %s   Date: %s" % (self.c("bwhite", self.tidy(msg["subject"])), msg["author"], fdate(msg["ts"]))
         if parent:
             head += "\nIn reply to #%d by %s" % (parent["id"], parent["author"])
-        await self.send(head + "\n\n" + "\n".join(textwrap.fill(ln, 76) if ln else "" for ln in msg["body"]) + "\n")
+        await self.send(head + "\n\n" + "\n".join(textwrap.fill(self.tidy(ln), 76) if ln else "" for ln in msg["body"]) + "\n")
         if kids:
             await self.send(self.c("gray", "\nReplies: " + ", ".join("#%d %s" % (m["id"], m["author"]) for m in kids) + "\n"))
         self.mark_seen(b, msg["id"])
@@ -4625,9 +4861,9 @@ class SocialMixin:
             for depth, m in ordered:
                 mark = self.c("bgreen", "*") if m in fresh else " "
                 indent = "  " * depth + ("└ " if depth else "")
-                subj = (indent + m["subject"])[:40]
+                subj = (indent + self.tidy(m["subject"]))[:40]
                 await self.send(" %s%s %s  %-14s %s\n" % (mark, self.c("byellow", "%4d" % m["id"]), fdate(m["ts"])[:10], m["author"][:14], subj))
-            cmds = "[R]ead #  [A]nswer #  [P]ost  " + ("[N]ew (%d)  " % len(fresh) if fresh else "") + ("[D]elete #  " if self.mod else "") + "[Q]uit"
+            cmds = "[R]ead #  " + ("[A]nswer #  [P]ost  " if self.may("post") else "") + ("[N]ew (%d)  " % len(fresh) if fresh else "") + ("[D]elete #  " if self.mod else "") + "[Q]uit"
             parts = (await self.readline("\n%s\n> " % cmds)).strip().split()
             if not parts:
                 continue
@@ -4656,6 +4892,8 @@ class SocialMixin:
                 if self.guest:
                     await self.send(self.c("red", "Guests can't post. Register an account!\n"))
                     continue
+                if not self.may("post"):
+                    continue
                 if bbs.is_muted(self.name):
                     await self.send(self.c("red", "You are muted.\n"))
                     continue
@@ -4677,6 +4915,7 @@ class SocialMixin:
                     if cmd == "a":
                         new["reply"] = msg["id"]
                     msgs.append(new)
+                    bbs.log("%s posted on %s: %s" % (self.name, b["name"], subject))
                     self.mark_seen(b, new["id"])
                     bbs.save("boards", bbs.boards)
                     bbs.save("users", bbs.users)
@@ -4689,6 +4928,7 @@ class SocialMixin:
                             other.push(other.c("bgreen", "[%s] %s answered your message #%d" % (b["name"], self.name, msg["id"])))
             elif cmd == "d" and self.mod and msg:
                 msgs.remove(msg)
+                bbs.log("%s deleted message %s on %s" % (self.name, msg["id"], b["name"]))
                 bbs.save("boards", bbs.boards)
                 await self.send("Deleted.\n")
 
@@ -4919,6 +5159,8 @@ class ConfigMixin:
             ("G", "News settings", lambda: self.cfg_form("News settings", raw["news"], SPEC_NEWS)),
             ("H", "Pastebin settings", lambda: self.cfg_form("Pastebin settings", raw["paste"], SPEC_PASTE)),
             ("E", "Art rotation", lambda: self.cfg_form("Art rotation", raw, [("art_dir", "Art folder", "str", None), ("art_rotation", "Rotation", "pick", PICK_ROT)])),
+            ("K", "Kids mode", lambda: self.cfg_form("Kids mode", raw["kids"], SPEC_KIDS)),
+            ("L", "Kids mode: ages for each feature", lambda: self.cfg_form("Ages", raw["kids"]["min_age"], SPEC_AGES)),
         ]
         while True:
             self.where = "Configuring"
@@ -5141,7 +5383,7 @@ class PasteMixin:
         w = max(30, self.cols - 8)
         n = 0
         for i, ln in enumerate(p["body"], 1):
-            for part in (textwrap.wrap(ln, w) or [""]):
+            for part in (textwrap.wrap(self.tidy(ln), w) or [""]):
                 await self.send(" %s %s\n" % (self.c("gray", "%3d" % i), part))
                 n += 1
                 if n % page == 0 and (await self.readline(self.c("gray", "-- more (Enter, Q stops) --"))).strip().lower().startswith("q"):
@@ -5312,8 +5554,9 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         self.toasts, self.alert = [], None
         self.ignored, self.afk, self.after_chat, self.seen_rooms = set(), "", None, {}
         self.logged_in = False
+        self.age = None  # (Kids mode: how old the caller is)
         self.telnet = False
-        self._where = "Logging in"
+        self._where = self._logged = "Logging in"
         self.joined = time.time()
         self.room = None
         self.buf = ""
@@ -5331,10 +5574,59 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             self._where = place
             if self in self.bbs.sessions:
                 self.bbs.write_online()
+                # (Private mail and pages to the sysop stay out of the log, and leave no gap in it.)
+                if place not in ("Reading mail", "Paging the sysop") and not place.startswith("Chat #page-") \
+                        and place != self._logged:
+                    self._logged = place
+                    self.bbs.log("%s went into %s" % (self.name, place))
 
     # ---- output ----------------------------------------------------------
     def c(self, color, text):
         return paint(text, color, self.color)
+
+    # ---- kids mode -------------------------------------------------------
+    def kids(self):
+        return bool(self.cfg["kids"]["enabled"])
+
+    def may(self, what):
+        """Old enough for this feature (Kids mode; the sysops always are)?"""
+        if not self.kids() or self.sysop:
+            return True
+        return (self.age if self.age is not None else ADULT) >= self.cfg["kids"]["min_age"].get(what, 0)
+
+    def fits(self, ages):
+        return not self.kids() or self.sysop or age_fits(self.age, ages)
+
+    def tidy(self, text):
+        """Text others wrote, with rude words hidden from younger callers."""
+        if not self.kids() or self.sysop or (self.age if self.age is not None else ADULT) >= self.cfg["kids"]["filter_under"]:
+            return text
+        return self.bbs.rude_re().sub(lambda m: m.group(0)[0] + "*" * (len(m.group(0)) - 1), text)
+
+    def sees(self, name, age):
+        """Kids under 13 are not shown to other adults: only to their family, other young
+        callers and the sysops."""
+        if not self.kids() or self.sysop or age is None or age >= KID:
+            return True
+        if self.age is not None and self.age < ADULT:
+            return True
+        return self.bbs.family(self.name, name)
+
+    async def ask_age(self):
+        for _ in range(3):
+            a = (await self.readline("How old are you? ")).strip()
+            if a.isdigit() and 3 <= int(a) <= 120:
+                return int(a)
+            await self.send(self.c("red", "Please type your age as a number.\n"))
+        raise Quit
+
+    async def too_young(self, age):
+        need = self.cfg["kids"]["join_age"]
+        if age is not None and age < need:
+            await self.send(self.c("byellow", "Sorry, %s is for callers aged %d and up. Ask a grown-up "
+                                              "about a board for you!\n" % (self.cfg["name"], need)))
+            return True
+        return False
 
     def _encode(self, text):
         return text.encode("cp437", "replace") if self.cp437 else text.encode("utf-8")
@@ -5513,6 +5805,9 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             await self.text_file(self.cfg.get("greeting"))
             await self.send("\n  Caller #%d. Press Ctrl-C to disconnect any time.\n"
                             % (bbs.meta.get("calls", 0) + 1))
+            if self.cfg.get("log", True):
+                await self.send(self.c("gray", "  What you do in public here is logged (private mail "
+                                               "and private messages are not).\n"))
             await self.login()
             self.timeout = self.cfg["idle_timeout"]
             self.logged_in = True
@@ -5575,6 +5870,10 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                 if bbs.bans.get("locked"):
                     await self.send(self.c("red", "Logins are closed right now.\n"))
                     continue
+                if self.kids():
+                    self.age = await self.ask_age()
+                    if await self.too_young(self.age):
+                        raise Quit
                 self.name, self.guest = bbs.guest_name(), True
                 await self.send("Welcome, %s. Guests are read-only for boards and mail.\n" % self.name)
                 return
@@ -5608,6 +5907,13 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             self.name = user["name"]
             self.sysop = is_sysop
             self.deputy = bool(user.get("deputy")) and not is_sysop
+            if self.kids() and not self.sysop:
+                if user.get("born") is None:  # (made before Kids mode: asked once)
+                    user["born"] = time.localtime().tm_year - await self.ask_age()
+                    bbs.save("users", bbs.users)
+                self.age = bbs.age_of(self.name)
+                if await self.too_young(self.age):
+                    raise Quit
             self.ignored = set(user.get("ignore", []))
             if user["calls"]:
                 await self.send("\nWelcome back, %s. Last call: %s. Calls: %d.\n"
@@ -5637,6 +5943,11 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             return None
         if not await self.ask_yn("No account '%s'. Create it?" % name, True):
             return None
+        age = None
+        if self.kids():
+            age = await self.ask_age()
+            if await self.too_young(age):
+                raise Quit
         for _ in range(3):
             pw = await self.readline("Choose a password (4+ chars): ", echo=False)
             if len(pw) < 4:
@@ -5647,6 +5958,9 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                 continue
             user = await self.bbs.make_user(name, pw)
             user["calls"] = 0
+            if age is not None:
+                user["born"] = time.localtime().tm_year - age
+                self.bbs.save("users", self.bbs.users)
             return user
         return None
 
@@ -5654,21 +5968,23 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
     async def menu(self):
         bbs, f = self.bbs, self.feat
         actions = {
-            "B": ("Message boards", f["boards"] and bool(self.cfg["board_list"]), self.boards),
-            "M": ("Private mail", f["mail"] and not self.guest, self.mailbox),
-            "C": ("Chat rooms", f["chat"] and bool(bbs.rooms), self.chat),
-            "F": ("Files", f.get("files") and bool(self.areas()), self.files),
-            "D": ("Games", f.get("games") and bool(self.games()), self.games_menu),
-            "A": ("Apps", f.get("apps") and bool(self.apps()), self.apps_menu),
-            "P": ("Multiplayer games", f.get("multiplayer", True), self.multiplayer),
+            "B": ("Message boards", f["boards"] and self.may("boards") and bool(self.my_boards()), self.boards),
+            "M": ("Private mail", f["mail"] and not self.guest and (self.may("mail") or self.has_family()), self.mailbox),
+            "C": ("Chat rooms", f["chat"] and self.may("chat") and bool(self.my_rooms()), self.chat),
+            "F": ("Files", f.get("files") and self.may("files") and bool(self.areas()), self.files),
+            "D": ("Games", f.get("games") and self.may("games") and bool(self.games()), self.games_menu),
+            "A": ("Apps", f.get("apps") and self.may("apps") and bool(self.apps()), self.apps_menu),
+            "P": ("Multiplayer games", f.get("multiplayer", True) and self.may("multiplayer"), self.multiplayer),
+            "E": ("Family", self.kids() and self.cfg["kids"].get("parents") and not self.guest
+                  and (self.has_family() or (self.age if self.age is not None else ADULT) >= ADULT), self.family_menu),
             "V": ("Voting booth", f.get("polls", True) or f.get("elections") or bool(bbs.elect["current"]),
                   self.voting_booth),
             "Y": ("Today", f.get("daily", True), self.today),
             "X": ("Page the sysop", f.get("page", True) and f.get("chat") and bool(bbs.rooms), self.page_sysop),
-            "K": ("Pastebin", f.get("pastebin", True), self.pastebin),
-            "N": ("News", f.get("news", True), self.news_menu),
-            "O": ("Oneliner wall", f.get("oneliners", True), self.oneliner_wall),
-            "R": ("Profiles", f.get("profiles", True), self.profiles),
+            "K": ("Pastebin", f.get("pastebin", True) and self.may("pastebin"), self.pastebin),
+            "N": ("News", f.get("news", True) and self.may("news"), self.news_menu),
+            "O": ("Oneliner wall", f.get("oneliners", True) and self.may("oneliners"), self.oneliner_wall),
+            "R": ("Profiles", f.get("profiles", True) and self.may("profiles"), self.profiles),
             "Q": ("Trivia & quiz", f.get("trivia", True), self.trivia_menu),
             "J": ("Statistics", f.get("stats", True), self.stats_menu),
             "L": ("Last callers", f.get("lastcallers", True), self.last_callers),
@@ -5702,7 +6018,11 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             else:
                 for r in rows:
                     await self.send("  " + r + "\n")
-            key = (await self.readline("\n%s> " % self.c("bwhite", self.name))).strip().upper()[:1]
+            line = (await self.readline("\n%s> " % self.c("bwhite", self.name))).strip()
+            if self.sysop and line.lower().split()[:1] == ["op"]:  # op restart, op update, op help...
+                await self.op_line(line[2:].strip())
+                continue
+            key = line.upper()[:1]
             if key == "G":
                 await self.send("\n" + (self.cfg.get("goodbye") or "Thanks for calling %s. Goodbye!" % self.cfg["name"]) + "\n")
                 if self.cfg.get("hosted"):
@@ -6105,7 +6425,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             for i, m in enumerate(box, 1):
                 flag = self.c("bgreen", "*") if not m["read"] else " "
                 await self.send(" %s%3d  %-16s %s  %s\n" % (
-                    flag, i, m["from"], fdate(m["ts"])[:10], m["subject"][:34]))
+                    flag, i, m["from"], fdate(m["ts"])[:10], self.tidy(m["subject"])[:34]))
             parts = (await self.readline("\n[R]ead #  [S]end  [D]elete #  [Q]uit\n> ")).strip().split()
             if not parts:
                 continue
@@ -6123,8 +6443,8 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                 m["read"] = True
                 bbs.save("mail", bbs.mail)
                 await self.send("\n%s\nFrom: %s   Date: %s\n\n%s\n" % (
-                    self.c("bwhite", m["subject"]), m["from"], fdate(m["ts"]),
-                    "\n".join(textwrap.fill(ln, 76) if ln else "" for ln in m["body"])))
+                    self.c("bwhite", self.tidy(m["subject"])), m["from"], fdate(m["ts"]),
+                    "\n".join(textwrap.fill(self.tidy(ln), 76) if ln else "" for ln in m["body"])))
                 await self.readline(self.c("gray", "\n[Enter to continue]"))
             elif cmd == "d":
                 box.pop(idx)
@@ -6142,6 +6462,10 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         if not rec:
             await self.send(self.c("red", "No such user.\n"))
             return
+        # (Why not is not told: nobody learns someone else's age.)
+        if not bbs.may_contact(self.name, self.age, rec["name"], bbs.age_of(rec["name"]), "mail"):
+            await self.send(self.c("red", "You can't send mail to %s.\n" % rec["name"]))
+            return
         if len(bbs.mail.get(to.lower(), [])) >= 100:
             await self.send(self.c("red", "Their mailbox is full.\n"))
             return
@@ -6154,7 +6478,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         bbs.save("mail", bbs.mail)
         online = bbs.find_session(rec["name"])
         if online:
-            online.push(online.c("bgreen", "[mail] New message from %s: %s" % (self.name, subject)))
+            online.push(online.c("bgreen", "[mail] New message from %s: %s" % (self.name, online.tidy(subject))))
         await self.send(self.c("bgreen", "Sent.\n"))
         self.award("writer")
         bbs.track(self.name, "mails")
@@ -6169,14 +6493,14 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         if e["kind"] == "sys":
             return "%s %s" % (stamp, self.c("gray", "* " + e["text"]))
         if e["kind"] == "emo":
-            return "%s %s %s %s" % (stamp, self.c("magenta", "*"), who, e["text"])
+            return "%s %s %s %s" % (stamp, self.c("magenta", "*"), who, self.tidy(e["text"]))
         if e["kind"] == "pm":
-            return "%s %s %s: %s" % (stamp, self.c("bmagenta", "[pm]"), who, e["text"])
-        return "%s <%s> %s" % (stamp, who, e["text"])
+            return "%s %s %s: %s" % (stamp, self.c("bmagenta", "[pm]"), who, self.tidy(e["text"]))
+        return "%s <%s> %s" % (stamp, who, self.tidy(e["text"]))
 
     def room_list(self):
         out = []
-        for r in self.bbs.rooms.values():
+        for r in self.my_rooms().values():
             lock = " (locked)" if r.password else ""
             guest = " (members only)" if not r.guests and self.guest else ""
             unread = r.count - self.seen_rooms.get(r.name, r.count)
@@ -6187,7 +6511,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
 
     async def chat(self):
         self.where = "Chat"
-        rooms = self.bbs.rooms
+        rooms = self.my_rooms()
         while True:
             await self.header("Chat rooms")
             await self.send(self.room_list() + "\n")
@@ -6203,7 +6527,7 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                 await self.mp_play(table)
 
     async def enter_ok(self, room, given_pw=""):
-        if room is None:
+        if room is None or room.name not in self.my_rooms():
             await self.send(self.c("red", "No such room.\n"))
             return None
         if self.guest and not room.guests:
@@ -6244,6 +6568,8 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                         await self.send(self.c("red", "You are muted.\n"))
                         continue
                     room.say("msg", self.name, line)
+                    if not room.name.startswith("page-"):  # (a page is private)
+                        self.bbs.log("%s [#%s] %s" % (self.name, room.name, line))
                     self.award("chatter")
                     self.bbs.track(self.name, "chats", save=False)
                     continue
@@ -6263,8 +6589,11 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                         return target
                 elif cmd == "me" and arg:
                     room.say("emo", self.name, arg)
+                    if not room.name.startswith("page-"):
+                        self.bbs.log("%s [#%s] * %s %s" % (self.name, room.name, self.name, arg))
                 elif cmd == "who":
-                    await self.send("In #%s: %s\n" % (room.name, ", ".join(sorted(m.name for m in room.members))))
+                    await self.send("In #%s: %s\n" % (room.name, ", ".join(sorted(
+                        m.name for m in room.members if self.sees(m.name, getattr(m, "age", None))))))
                 elif cmd == "rooms":
                     await self.send(self.room_list() + "\n")
                 elif cmd in ("msg", "pm", "w"):
@@ -6272,6 +6601,9 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                     target = self.bbs.find_session(to)
                     if not target or not text.strip():
                         await self.send(self.c("red", "Usage: /msg <online user> <text>\n"))
+                    elif self.kids() and (target.guest or self.guest or not self.bbs.may_contact(
+                            self.name, self.age, target.name, target.age, "pm")):
+                        await self.send(self.c("red", "You can't send private messages to %s.\n" % target.name))
                     else:
                         e = {"ts": time.time(), "kind": "pm", "who": self.name, "text": text.strip()}
                         if self.name.lower() not in target.ignored:
@@ -6279,8 +6611,11 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
                         await self.send(self.c("bmagenta", "[pm to %s] " % target.name) + text.strip() + "\n")
                         if target.afk:
                             await self.send(self.c("gray", "%s is away: %s\n" % (target.name, target.afk)))
+                elif cmd == "op" and self.sysop:
+                    await self.op_line(arg)
                 elif cmd == "topic" and self.mod:
                     room.topic = arg
+                    self.bbs.log("%s [#%s] set the topic: %s" % (self.name, room.name, arg))
                     room.say("sys", self.name, "%s set the topic: %s" % (self.name, arg))
                 elif cmd == "help":
                     await self.send(
@@ -6306,6 +6641,8 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
     async def who(self):
         await self.header("Who's online")
         for s in sorted(self.bbs.sessions, key=lambda s: s.joined):
+            if not self.sees(s.name, s.age):
+                continue
             await self.send(" %-16s %-22s on for %s\n" % (
                 s.name + ("*" if s.sysop else "+" if s.deputy else ""), s.where, duration(time.time() - s.joined)))
         await self.readline(self.c("gray", "\n[Enter to continue]"))
@@ -6314,8 +6651,140 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         await self.header("Users")
         users = sorted(self.bbs.users.values(), key=lambda u: -u["last"])[:40]
         for u in users:
-            await self.send(" %-16s %4d calls   last on %s\n" % (u["name"], u["calls"], fdate(u["last"])))
+            age = self.bbs.age_of(u["name"])
+            if not self.sees(u["name"], age):
+                continue
+            extra = ("   age %s" % (age if age is not None else "?")) if self.sysop and self.kids() else ""
+            await self.send(" %-16s %4d calls   last on %s%s\n" % (u["name"], u["calls"], fdate(u["last"]), extra))
         await self.readline(self.c("gray", "\n[Enter to continue]"))
+
+    async def op_line(self, line):
+        """A sysop's op command typed at the main menu ("op restart") or in a chat room ("/op ...")."""
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            words = []
+        ok, out = Ops(self.bbs, True).run(words)
+        await self.send(self.c("byellow" if ok else "red", out) + "\n")
+
+    # ---- families (Parent mode) -------------------------------------------
+    def has_family(self):
+        u = self.bbs.users.get(self.name.lower(), {})
+        return bool(self.kids() and self.cfg["kids"].get("parents") and
+                    (u.get("parents") or self.bbs.children(self.name)))
+
+    async def family_menu(self):
+        """Parents: their children's accounts, and who else may write to them."""
+        bbs = self.bbs
+        self.where = "Family"
+        while True:
+            me = bbs.users.get(self.name.lower(), {})
+            kids = bbs.children(self.name)
+            await self.header("Family")
+            if me.get("parents"):
+                await self.send("  Your parents here: %s\n" % ", ".join(me["parents"]))
+                if me.get("approved"):
+                    await self.send("  Also allowed to write to you: %s\n" % ", ".join(me["approved"]))
+            for i, k in enumerate(kids, 1):
+                u = bbs.users.get(k.lower(), {})
+                await self.send(" %s %-16s age %-3s %s%s\n" % (
+                    self.c("byellow", "%2d" % i), k, bbs.age_of(k) if bbs.age_of(k) is not None else "?",
+                    "approved: " + (", ".join(u.get("approved") or []) or "nobody else"),
+                    self.c("bmagenta", "  (family only)") if u.get("family_only") else ""))
+            grown = (self.age if self.age is not None else ADULT) >= ADULT
+            if not grown:
+                await self.readline(self.c("gray", "\n[Enter to continue]"))
+                return
+            if not kids:
+                await self.send("  You have no children's accounts here yet.\n")
+            k = (await self.readline("\n[N]ew child account  [A]pprove someone  [R]emove approval\n"
+                                     "[O]nly family for a child (on/off)  [Q]uit\n> ")).strip().lower()[:1]
+            if k in ("", "q"):
+                return
+            if k == "n":
+                await self.new_child()
+                continue
+            if not kids:
+                continue
+            pick = (await self.readline("Which child # (1-%d): " % len(kids))).strip()
+            if not pick.isdigit() or not 1 <= int(pick) <= len(kids):
+                continue
+            child = bbs.users[kids[int(pick) - 1].lower()]
+            if k == "o":
+                child["family_only"] = not child.get("family_only")
+                await self.send("%s: %s.\n" % (child["name"], "only family and approved people may write"
+                                                if child["family_only"] else "anyone their age allows may write"))
+            elif k == "a":
+                who = bbs.users.get((await self.readline("Handle of the person to approve: ")).strip().lower())
+                if not who or who["name"].lower() in (child["name"].lower(), self.name.lower()):
+                    await self.send(self.c("red", "No such user.\n"))
+                    continue
+                child.setdefault("approved", [])
+                if who["name"] not in child["approved"]:
+                    child["approved"].append(who["name"])
+                await self.send(self.c("bgreen", "%s may write to %s now, and %s to them.\n" % (
+                    who["name"], child["name"], child["name"])))
+            elif k == "r":
+                name = (await self.readline("Handle to remove: ")).strip().lower()
+                child["approved"] = [a for a in child.get("approved") or [] if a.lower() != name]
+            bbs.save("users", bbs.users)
+
+    async def new_child(self):
+        """A parent makes their child's account: it is theirs from the start."""
+        bbs = self.bbs
+        name = (await self.readline("Your child's handle: ")).strip()
+        if not NAME_RE.match(name) or name.lower().startswith("guest") or name.lower() in bbs.users:
+            await self.send(self.c("red", "That handle can't be used (2-16 letters, digits, _ or -, not taken).\n"))
+            return
+        age = (await self.readline("Their age: ")).strip()
+        if not age.isdigit() or not 3 <= int(age) < ADULT:
+            await self.send(self.c("red", "Children's accounts are for ages 3 to 17.\n"))
+            return
+        if int(age) < self.cfg["kids"]["join_age"]:
+            await self.send(self.c("red", "This BBS is for callers aged %d and up.\n" % self.cfg["kids"]["join_age"]))
+            return
+        pw = await self.readline("Their password (4+ chars): ", echo=False)
+        if len(pw) < 4 or pw != await self.readline("Again: ", echo=False):
+            await self.send(self.c("red", "Too short, or not the same twice.\n"))
+            return
+        user = await bbs.make_user(name, pw)
+        user.update(calls=0, born=time.localtime().tm_year - int(age), parents=[self.name], approved=[])
+        bbs.save("users", bbs.users)
+        bbs.log("%s made a child account: %s" % (self.name, name))
+        await self.send(self.c("bgreen", "%s's account is made. They log in with that handle and password.\n" % name))
+
+    async def sysop_family(self, cmd):
+        bbs = self.bbs
+        name = (await self.readline("Handle: ")).strip().lower()
+        u = bbs.users.get(name)
+        if not u:
+            await self.send(self.c("red", "No such user.\n"))
+            return
+        if cmd == "a":
+            a = (await self.readline("Their age (Enter: not known): ")).strip()
+            if a.isdigit() and 3 <= int(a) <= 120:
+                u["born"] = time.localtime().tm_year - int(a)
+            elif not a:
+                u.pop("born", None)
+            else:
+                return
+        elif cmd == "l":
+            p = bbs.users.get((await self.readline("Their parent's handle: ")).strip().lower())
+            if not p or p is u:
+                await self.send(self.c("red", "No such user.\n"))
+                return
+            u.setdefault("parents", [])
+            if p["name"] not in u["parents"]:
+                u["parents"].append(p["name"])
+        elif cmd == "u":
+            u["parents"], u["approved"] = [], []
+        bbs.save("users", bbs.users)
+        s = bbs.find_session(u["name"])
+        if s and cmd == "a":
+            s.age = bbs.age_of(u["name"])
+        bbs.log("%s set %s: age %s, parents %s" % (self.name, u["name"], bbs.age_of(u["name"]), ", ".join(u.get("parents") or []) or "none"))
+        await self.send("Done: %s, age %s, parents: %s.\n" % (
+            u["name"], bbs.age_of(u["name"]), ", ".join(u.get("parents") or []) or "none"))
 
     async def info(self):
         bbs, f = self.bbs, self.feat
@@ -6326,7 +6795,9 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
             " chat: %s   boards: %s   mail: %s   guests: %s   registration: %s\n" % (
                 VERSION, duration(time.time() - bbs.started), len(bbs.sessions),
                 bbs.meta.get("calls", 0), len(bbs.users),
-                on(f["chat"]), on(f["boards"]), on(f["mail"]), on(f["guests"]), on(f["register"])))
+                on(f["chat"]), on(f["boards"]), on(f["mail"]), on(f["guests"]), on(f["register"])) +
+            (" kids mode: on (features go by age)%s\n" % (", parent mode: on" if self.cfg["kids"].get("parents") else "")
+             if self.kids() else ""))
         await self.readline(self.c("gray", "\n[Enter to continue]"))
 
     async def sysop_tools(self):
@@ -6334,10 +6805,14 @@ class Session(ExtrasMixin, SocialMixin, QuizMixin, RetroMixin, ConfigMixin, Past
         bbs = self.bbs
         while True:
             await self.header("Sysop tools" if self.sysop else "Deputy tools")
-            opts = "[K]ick user  " + ("[B]roadcast  [F]orce a message  [C]onfigure the BBS  [S]ysops  [O]p command (type help)  " if self.sysop else "") + "[Q]uit"
+            opts = "[K]ick user  " + ("[B]roadcast  [F]orce a message  [C]onfigure the BBS  [S]ysops  [O]p command (type help)  " if self.sysop else "") + \
+                ("\n[A]ge of a user  [L]ink a child to a parent  [U]nlink  " if self.sysop and self.kids() else "") + "[Q]uit"
             cmd = (await self.readline(opts + "\n> ")).strip().lower()[:1]
             if cmd == "q" or not cmd:
                 return
+            if cmd in ("a", "l", "u") and self.sysop and self.kids():
+                await self.sysop_family(cmd)
+                continue
             if cmd == "b" and self.sysop:
                 text = (await self.readline("Message: ", maxlen=200)).strip()
                 if text:
@@ -6679,8 +7154,27 @@ SPEC_SYSOP = [("sysop", "Sysop handle", "str", None), ("data_dir", "Data folder"
               ("files_dir", "File areas folder", "str", None), ("stories_dir", "Text adventures folder", "str", None),
               ("weather_city", "Weather app's city", "str", None)]
 SPEC_ROOM = [("name", "Name", "str", None), ("topic", "Topic", "str", None),
-             ("password", "Password (blank = open)", "str", None), ("guests", "Guests allowed", "bool", None)]
-SPEC_BOARD = [("name", "Name", "str", None), ("desc", "Description", "str", None)]
+             ("password", "Password (blank = open)", "str", None), ("guests", "Guests allowed", "bool", None),
+             ("ages", "For (Kids mode)", "pick", AGES)]
+SPEC_BOARD = [("name", "Name", "str", None), ("desc", "Description", "str", None),
+              ("ages", "For (Kids mode)", "pick", AGES)]
+SPEC_KIDS = [("enabled", "Kids mode (callers say their age)", "bool", None),
+             ("parents", "Parent mode (families)", "bool", None),
+             ("join_age", "Youngest who may call", "int", None),
+             ("filter_under", "Hide rude words under age", "int", None),
+             ("words", "More words to hide", "motd", None)]
+SPEC_AGES = [("boards", "Read the message boards", "int", None), ("post", "Write on the boards", "int", None),
+             ("mail", "Private mail", "int", None), ("pm", "Private chat messages", "int", None),
+             ("chat", "Chat rooms", "int", None), ("files", "Files", "int", None),
+             ("games", "Games", "int", None), ("apps", "Apps", "int", None),
+             ("multiplayer", "Multiplayer games", "int", None), ("pastebin", "Pastebin", "int", None),
+             ("news", "News", "int", None), ("oneliners", "Oneliner wall", "int", None),
+             ("profiles", "Profiles", "int", None)]
+KIDS_HELP = ("Callers say their age when they join, and get the features their age allows; rooms and boards "
+             "can be for some ages only. Adults and under-18s can't write to each other privately or sit at "
+             "the same table, and kids under 13 are not shown to other adults. Parent mode: parents make their "
+             "children's accounts (Family in the main menu), may always write to them, and approve who else may. "
+             "Ages are what callers say: they are not checked.")
 FEATURES = [("chat", "Chat rooms"), ("boards", "Message boards"), ("mail", "Private mail"),
             ("files", "File areas (downloads)"), ("games", "Games"), ("apps", "Apps"),
             ("multiplayer", "Multiplayer games (Tic-Tac-Toe, Hangman)"), ("polls", "Voting booth (polls)"),
@@ -6908,6 +7402,7 @@ class Setup:
             ("R", "Web & reload", "web %s, autoreload %s" % ("on" if c["websocket"]["enabled"] else "off", "on" if c.get("autoreload", True) else "off")),
             ("T", "Timed messages", "%d scheduled" % len(c.get("schedule") or [])),
             ("N", "News channels", "%d channels" % len(c.get("news_channels") or [])),
+            ("K", "Kids mode", ("on" + (", parent mode" if c["kids"].get("parents") else "")) if c["kids"]["enabled"] else "off"),
             ("E", "Events & hours", "sysop hours %s" % (c.get("sysop_hours") or "any time")),
             ("V", "Voting & daily", "elections %s, %d seat%s" % ("on" if c["features"].get("elections") else "off",
                                                               c["election"]["seats"], "" if c["election"]["seats"] == 1 else "s")),
@@ -6964,6 +7459,11 @@ class Setup:
                                  {"at": "22:00", "days": "daily", "mode": "broadcast", "message": ""})   # (no message: it never fires)
             elif sel == "E":
                 self.events_hours()
+            elif sel == "K":
+                ui.form("Kids mode", KIDS_HELP, c["kids"], SPEC_KIDS,
+                        [("A", "Youngest age for each feature", lambda: ui.form(
+                            "Ages", "The youngest age for each feature (0: any age).", c["kids"]["min_age"],
+                            SPEC_AGES) and False)])
             elif sel == "N":
                 self.list_editor("News channels", "news_channels", SPEC_FEED,
                                  lambda i: "%-16s %s" % (i.get("name", ""), i.get("url", "")[:50]),
@@ -7045,6 +7545,7 @@ def build_parser():
     art.add_argument("text", nargs="?", help="text to render (default: the BBS name)")
     art.add_argument("--save", metavar="DIR", help="write generated banners for connect, rooms and boards "
                      "into DIR (set it as the art folder to rotate them)")
+    sub.add_parser("update", help="get the newest hostbbs (from rBBS on GitHub)")
     op = sub.add_parser("op", help="operator commands: kick, ban, force, polls... (hostbbs op help)")
     op.add_argument("-c", "--config", help="config file (default: ~/hostbbs/hostbbs.json)")
     op.add_argument("--data-dir", help="where the BBS keeps its data")
@@ -7458,6 +7959,14 @@ def main(argv=None):
 
     if args.cmd == "op":
         return run_op(args)
+    if args.cmd == "update":
+        try:
+            print(self_update())
+        except PermissionError as e:
+            sys.exit("hostbbs: %s (in Kilobyte: Internet > Host a BBS > Update)" % e)
+        except (OSError, ValueError, SyntaxError, UnicodeDecodeError) as e:
+            sys.exit("hostbbs: the update did not work: %s" % e)
+        return 0
 
     if args.cmd == "setup":
         path = Path(args.config).expanduser() if args.config else DEFAULT_CONFIG
