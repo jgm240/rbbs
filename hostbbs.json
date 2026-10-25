@@ -1,0 +1,190 @@
+{
+  "name": "rBBS",
+  "tagline": "Old Is Not Obsolete",
+  "host": "0.0.0.0",
+  "port": 2323,
+  "color": "ask",
+  "charset": "utf-8",
+  "features": {
+    "chat": false,
+    "boards": false,
+    "mail": false,
+    "guests": false,
+    "register": true,
+    "files": false,
+    "games": true,
+    "apps": true,
+    "polls": false,
+    "elections": false,
+    "multiplayer": false,
+    "achievements": true,
+    "daily": true,
+    "lastcallers": true,
+    "trivia": true,
+    "stats": true,
+    "oneliners": false,
+    "profiles": true,
+    "page": false,
+    "pastebin": false,
+    "news": false
+  },
+  "art": {
+    "enabled": true,
+    "style": "shade",
+    "colors": "rainbow",
+    "gradient": "horizontal",
+    "frame": "ascii",
+    "frame_color": "magenta",
+    "file": "",
+    "small": false
+  },
+  "art_dir": "art",
+  "art_rotation": "random",
+  "election": {
+    "days": 7,
+    "seats": 1,
+    "min_calls": 3
+  },
+  "tips": [],
+  "modem": {
+    "baud": 0,
+    "ask": true,
+    "handshake": true
+  },
+  "music": {
+    "enabled": false,
+    "ask": true,
+    "connect": "T200 O4 L8 C E G O5 L4 C",
+    "achievement": "T240 O5 L16 E G O6 L8 C"
+  },
+  "autoreload": true,
+  "websocket": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8080,
+    "origins": [],
+    "cert": "",
+    "key": ""
+  },
+  "schedule": [],
+  "phone": "555-0199",
+  "sysop_hours": "",
+  "birthday": "",
+  "news_channels": [
+    {
+      "name": "Hacker News",
+      "url": "https://hnrss.org/frontpage"
+    },
+    {
+      "name": "BBC News",
+      "url": "https://feeds.bbci.co.uk/news/rss.xml"
+    },
+    {
+      "name": "Ars Technica",
+      "url": "https://feeds.arstechnica.com/arstechnica/index"
+    },
+    {
+      "name": "Slashdot",
+      "url": "http://rss.slashdot.org/Slashdot/slashdotMain"
+    },
+    {
+      "name": "LWN.net",
+      "url": "https://lwn.net/headlines/rss"
+    },
+    {
+      "name": "The Register",
+      "url": "https://www.theregister.com/headlines.atom"
+    },
+    {
+      "name": "NASA",
+      "url": "https://www.nasa.gov/rss/dyn/breaking_news.rss"
+    },
+    {
+      "name": "xkcd",
+      "url": "https://xkcd.com/atom.xml"
+    }
+  ],
+  "news": {
+    "custom": true,
+    "per_user": 8,
+    "cache_minutes": 15,
+    "allow_private": false
+  },
+  "paste": {
+    "per_user": 50,
+    "max_lines": 300
+  },
+  "trivia_file": "",
+  "log": true,
+  "force": {
+    "title": "!! MESSAGE FROM THE SYSOP !!",
+    "style": "block",
+    "color": "red",
+    "text_color": "bwhite",
+    "center": true,
+    "bell": true,
+    "seconds": 15
+  },
+  "sysop": "admin",
+  "data_dir": "data",
+  "max_users": 64,
+  "idle_timeout": 900,
+  "history": 20,
+  "motd": [
+    "\\OEMSETUP.EXE"
+  ],
+  "greeting": "",
+  "goodbye": "Goodbye!",
+  "hosted": false,
+  "minutes": 0,
+  "files_dir": "",
+  "stories_dir": "",
+  "games": [
+    "adventure",
+    "hangman",
+    "robots",
+    "snake",
+    "sudoku",
+    "chess",
+    "minesweeper",
+    "solitaire",
+    "stories"
+  ],
+  "apps": [
+    "weather",
+    "dictionary",
+    "calculator",
+    "calendar"
+  ],
+  "weather_city": "",
+  "rooms": [
+    {
+      "name": "lobby",
+      "topic": "Say hello!"
+    },
+    {
+      "name": "tech",
+      "topic": "Computers, code and gadgets"
+    },
+    {
+      "name": "random",
+      "topic": "Anything goes"
+    },
+    {
+      "name": "retropcs",
+      "topic": "Retro PCs",
+      "password": "",
+      "guests": true
+    }
+  ],
+  "board_list": [
+    {
+      "name": "General",
+      "desc": "Open discussion"
+    },
+    {
+      "name": "Announcements",
+      "desc": "News from the sysop"
+    }
+  ]
+}
