@@ -378,6 +378,9 @@ def self_update(url=None):
     with open(me, encoding="utf-8") as f:
         if f.read() == text:
             return "hostbbs %s is the newest already." % VERSION
+    vt = lambda v: tuple(int(x) for x in v.split(".") if x.isdigit())
+    if vt(version) < vt(VERSION):  # (an update never goes back)
+        return "hostbbs %s here is newer than the one there (%s): kept." % (VERSION, version)
     if not os.access(me, os.W_OK) or not os.access(os.path.dirname(me), os.W_OK):
         raise PermissionError("this hostbbs (%s) may not be changed by its user" % me)
     st = os.stat(me)
